@@ -1,15 +1,18 @@
 import type { Metadata } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LocalBiz Pro — Card Generator",
-  description: "Instagram card generator for LocalBiz Pro",
+  title: "Magazin online — DPStore",
+  description: "Produse atent selectate pentru frumusețe, sănătate, casă, grădină și modă.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="ro">
+      <body>
+        <ClerkProvider>{children}</ClerkProvider>
+      </body>
     </html>
   );
 }

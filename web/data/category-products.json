@@ -1,0 +1,102 @@
+{
+  "crema-de-fata": [
+    {
+      "id": "creme-de-la-mer-moisturizing-250ml",
+      "name": "Product",
+      "category": "crema-de-fata",
+      "size": "250 ml",
+      "priceNow": 5209,
+      "priceOld": 5391,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Formatul generos al cremei iconice, pentru hidratare legendară zi de zi.",
+      "imageUrl": "https://media.douglas.ro/medias/T5rjdZ214799-0-global.jpg?context=bWFzdGVyfGltYWdlc3wxNDM1MDZ8aW1hZ2UvanBlZ3xhR1kzTDJnMVpDODJOak13TWpnNU5qSTBNamN4T0M5VU5YSnFaRm95TVRRM09UbGZNRjluYkc5aVlXd3VhbkJufGE0YTczY2IwNmZkYTk3MjkwOTkwYmY3ZTQzYmE4ZDJjNjhlNTViNmU4MmI2OWU0ZjVjMjczYTE5ZGJmNmEzMzE&grid=true",
+      "isReal": true,
+      "productUrl": "https://www.douglas.ro/ro/p/3000055335?variant=214799"
+    }
+  ],
+  "suplimente-vitamine": [
+    {
+      "id": "collagen-peptides-powder-300g",
+      "name": "Collagen Peptides Natur, 300 g, Pro Nutrition",
+      "category": "suplimente-vitamine",
+      "size": "300 g",
+      "priceNow": 149,
+      "priceOld": null,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Produs găsit pe BebeTei,  Collagen Peptides Natur.",
+      "imageUrl": "https://comenzi.bebetei.ro/themes/bootstrap5/assets/icons/icon-fara-parfum.png",
+      "isReal": true,
+      "productUrl": "https://comenzi.bebetei.ro/suplimente-alimentare-si-produse-naturiste/suplimente-alimentare/oase-muschi-si-articulatii/collagen-peptides-natur-300-g-pro-nutrition-p418716",
+      "images": [
+        "https://comenzi.bebetei.ro/themes/bootstrap5/assets/icons/icon-fara-parfum.png"
+      ]
+    },
+    {
+      "id": "magnesium-glycinate-60cps",
+      "name": "Magnesium Glycinate, 90 capsule, OstroVit",
+      "category": "suplimente-vitamine",
+      "size": "90 capsule",
+      "priceNow": 75,
+      "priceOld": 85,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Produs găsit pe BebeTei,  Magnesium Glycinate.",
+      "imageUrl": "https://media.bebetei.ro/gallery/122611/small/magnesium-glycinate-90-capsule-ostrovit-2457.png",
+      "isReal": true,
+      "productUrl": "https://comenzi.bebetei.ro/suplimente-alimentare-si-produse-naturiste/vitamine-si-minerale/magnesium-glycinate-90-capsule-ostrovit-p416475",
+      "images": [
+        "https://media.bebetei.ro/gallery/122611/small/magnesium-glycinate-90-capsule-ostrovit-2457.png"
+      ]
+    },
+    {
+      "id": "ph-balance-probiotic-30cps",
+      "name": "Women's pH Balance Probiotic",
+      "category": "suplimente-vitamine",
+      "size": "30 cps",
+      "priceNow": 99,
+      "priceOld": 109,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Probiotic zilnic pentru echilibrul pH și sănătatea intimă — cel mai vândut produs din categoria Health Care pe Amazon în 2026.",
+      "imageUrl": "https://picsum.photos/seed/ph-balance-probiotic-30cps/600/600",
+      "isReal": false,
+      "productUrl": null
+    },
+    {
+      "id": "berberine-complex-60cps",
+      "name": "Berberin Bioticx Complex, 30 capsule, Remedia",
+      "category": "suplimente-vitamine",
+      "size": "30 capsule",
+      "priceNow": 119,
+      "priceOld": null,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Produs găsit pe BebeTei,  Berberin Bioticx formulă.",
+      "imageUrl": "https://media.bebetei.ro/gallery/136508/small/berberin-bioticx-complex-30-capsule-remedia-3023.jpg",
+      "isReal": true,
+      "productUrl": "https://comenzi.bebetei.ro/suplimente-alimentare-si-produse-naturiste/suplimente-alimentare/glicemie/berberin-bioticx-complex-30-capsule-remedia-p425390",
+      "images": [
+        "https://media.bebetei.ro/gallery/136508/small/berberin-bioticx-complex-30-capsule-remedia-3023.jpg"
+      ]
+    },
+    {
+      "id": "turmeric-curcumin-60cps",
+      "name": "Turmeric Curcumin extract plus Piperina, 500 mg, 60 capsule vegetale, Nutrific",
+      "category": "suplimente-vitamine",
+      "size": "60 capsule",
+      "priceNow": 79,
+      "priceOld": 89,
+      "pricePerMl": null,
+      "currency": "RON",
+      "description": "Produs găsit pe BebeTei,  Turmeric Curcumin extract plus Piperina.",
+      "imageUrl": "https://media.bebetei.ro/gallery/150920/small/turmeric-curcumin-extract-plus-piperina-500-mg-60-capsule-vegetale-nutrific-6946.png",
+      "isReal": true,
+      "productUrl": "https://comenzi.bebetei.ro/suplimente-alimentare-si-produse-naturiste/suplimente-alimentare/oase-muschi-si-articulatii/turmeric-curcumin-extract-plus-piperina-500-mg-60-capsule-vegetale-nutrific-p468987",
+      "images": [
+        "https://media.bebetei.ro/gallery/150920/small/turmeric-curcumin-extract-plus-piperina-500-mg-60-capsule-vegetale-nutrific-6946.png"
+      ]
+    }
+  ]
+}

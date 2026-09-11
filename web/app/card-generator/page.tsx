@@ -111,7 +111,7 @@ function CardPreview({ fields }: { fields: CardFields }) {
         <div className="card-box">
           <div style={{ display: "flex", gap: 60, alignItems: "center" }}>
             {/* LEFT */}
-            <div style={{ flex: 1 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
               {/* Brand name */}
               <div style={{ lineHeight: 0.9 }}>
                 <div style={{ fontSize: 96, fontWeight: 900, letterSpacing: 8, color: CREAM, textShadow: "0 0 40px rgba(240,234,204,0.15)" }}>
@@ -219,9 +219,12 @@ export default function CardGenerator() {
   };
 
   const downloadPNG = useCallback(async () => {
-    if (!previewRef.current || downloading) return;
+    if (!previewRef.current || !scaleRef.current || downloading) return;
     setDownloading(true);
+    const el = scaleRef.current;
+    const prevTransform = el.style.transform;
     try {
+      el.style.transform = "none";
       const html2canvas = (await import("html2canvas")).default;
       const canvas = await html2canvas(previewRef.current, {
         width: 1080,
@@ -236,38 +239,45 @@ export default function CardGenerator() {
       a.download = `localbizpro-${DAYS[dayIdx].toLowerCase()}-card.png`;
       a.click();
     } finally {
+      el.style.transform = prevTransform;
       setDownloading(false);
     }
   }, [dayIdx, downloading]);
 
   const downloadAllDays = useCallback(async () => {
-    if (downloading || allProgress) return;
+    if (downloading || allProgress || !scaleRef.current) return;
     const html2canvas = (await import("html2canvas")).default;
     const savedFields = { ...fields };
     const savedDay = dayIdx;
+    const el = scaleRef.current;
+    const prevTransform = el.style.transform;
+    el.style.transform = "none";
 
-    for (let i = 0; i < 7; i++) {
-      setAllProgress(`${i + 1} / 7 — ${DAYS[i]}`);
-      setDayIdx(i);
-      setFields(f => ({ ...f, headline: THEMES[i].headline, sub: THEMES[i].sub, cta: THEMES[i].cta }));
-      // Wait for React to re-render
-      await new Promise(r => setTimeout(r, 300));
-      if (!previewRef.current) continue;
-      const canvas = await html2canvas(previewRef.current, {
-        width: 1080, height: 1080, scale: 1, useCORS: true, backgroundColor: "#0a0a14",
-      });
-      const url = canvas.toDataURL("image/png");
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `localbizpro-${DAYS[i].toLowerCase()}-card.png`;
-      a.click();
-      await new Promise(r => setTimeout(r, 200));
+    try {
+      for (let i = 0; i < 7; i++) {
+        setAllProgress(`${i + 1} / 7 — ${DAYS[i]}`);
+        setDayIdx(i);
+        setFields(f => ({ ...f, headline: THEMES[i].headline, sub: THEMES[i].sub, cta: THEMES[i].cta }));
+        // Wait for React to re-render
+        await new Promise(r => setTimeout(r, 300));
+        if (!previewRef.current) continue;
+        const canvas = await html2canvas(previewRef.current, {
+          width: 1080, height: 1080, scale: 1, useCORS: true, backgroundColor: "#0a0a14",
+        });
+        const url = canvas.toDataURL("image/png");
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `localbizpro-${DAYS[i].toLowerCase()}-card.png`;
+        a.click();
+        await new Promise(r => setTimeout(r, 200));
+      }
+    } finally {
+      el.style.transform = prevTransform;
+      // Restore original
+      setDayIdx(savedDay);
+      setFields(savedFields);
+      setAllProgress(null);
     }
-
-    // Restore original
-    setDayIdx(savedDay);
-    setFields(savedFields);
-    setAllProgress(null);
   }, [downloading, allProgress, fields, dayIdx]);
 
   const update = (key: keyof CardFields) => (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) =>
