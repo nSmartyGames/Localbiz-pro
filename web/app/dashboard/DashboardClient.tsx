@@ -166,19 +166,6 @@ function pickRowValue(row: Record<string, unknown>, ...keys: string[]): string {
   return "";
 }
 
-// Same case-insensitive key match as pickRowValue, but just checks presence
-// (any non-empty string OR non-empty array) — used for fields like Images
-// that may arrive as an array rather than a single string.
-function rowHasValue(row: Record<string, unknown>, ...keys: string[]): boolean {
-  const wanted = new Set(keys.map((key) => key.toLowerCase()));
-  return Object.entries(row).some(([key, value]) => {
-    if (!wanted.has(key.trim().toLowerCase())) return false;
-    if (Array.isArray(value)) return value.length > 0;
-    if (typeof value === "string") return value.trim().length > 0;
-    return value !== null && value !== undefined && value !== "";
-  });
-}
-
 function isEmptyValue(value: unknown): boolean {
   return value === undefined || value === null || value === "";
 }
@@ -522,7 +509,12 @@ export default function DashboardClient({
   }
 
   function getProductUrl(row: Record<string, unknown>): string {
-    return pickRowValue(row, "product url", "producturl");
+    const mappedColumn = columns.find((column) => columnMapping[column] === "Product URL");
+    if (mappedColumn) {
+      const value = row[mappedColumn];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return pickRowValue(row, "product url", "producturl", "url");
   }
 
   // Just opens the product page for the admin to read off values by hand —
@@ -581,13 +573,13 @@ export default function DashboardClient({
 
     if (mode !== "allWithoutImages") {
       // fields["Image URL"]/["Product Images"] reflect whatever column the
-      // user actually mapped to those targets — checking those (not just
-      // the raw row's own English-named keys) is what makes a manually
-      // mapped non-English image column (e.g. "Imagine") count as present.
+      // user actually mapped to those targets. An unmapped raw key (e.g. the
+      // scraper's own "images" field) does NOT count as present here — it
+      // never reaches buildFinalRow's output, so trusting it made this check
+      // pass while the actual Airtable write ended up with no image at all.
       const hasImage =
         !isEmptyValue(fields["Image URL"]) ||
         !isEmptyValue(fields["Product Images"]) ||
-        rowHasValue(row, "image url", "image", "product images", "images") ||
         Boolean(manual["Image URL"]) ||
         Boolean(info?.images?.length);
       if (!hasImage) missing.push("Image URL");
@@ -613,7 +605,7 @@ export default function DashboardClient({
       fields.Description = [descriptionPrefix, fields.Description].filter(Boolean).join("\n\n");
     }
 
-    if (isEmptyValue(fields["Image URL"]) && isEmptyValue(fields["Product Images"]) && !rowHasValue(parsedRows[index], "image url", "image", "product images", "images")) {
+    if (isEmptyValue(fields["Image URL"]) && isEmptyValue(fields["Product Images"])) {
       if (info?.images?.length) {
         // The row's dragged-in gallery — the import route re-fetches each
         // URL to re-host it, but this way the thumbnails shown in the table
