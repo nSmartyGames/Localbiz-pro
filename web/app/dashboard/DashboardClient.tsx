@@ -134,6 +134,22 @@ function applyTemplateMapping(columns: string[], template: ColumnTemplate | null
   return mapping;
 }
 
+// Known header spellings for the product-URL column across import sources
+// ("URL Produs", "URL", "URL Product"), matched by normalizeKey so casing
+// and spacing don't matter. Only applied when the admin clicks the button —
+// kept opt-in to stay consistent with the no-auto-guessing rule above.
+const PRODUCT_URL_ALIASES = new Set(["urlprodus", "url", "urlproduct"].map(normalizeKey));
+
+function applyProductUrlAliasMapping(columns: string[], mapping: Record<string, string>): Record<string, string> {
+  const next = { ...mapping };
+  for (const column of columns) {
+    if (PRODUCT_URL_ALIASES.has(normalizeKey(column))) {
+      next[column] = "Product URL";
+    }
+  }
+  return next;
+}
+
 const CATEGORY_STOPWORDS = new Set(["de", "si", "cu", "la", "din", "pentru", "si", "pe", "the", "and", "for"]);
 
 // Guesses a row's category from its product name by scoring every known
@@ -262,6 +278,8 @@ export default function DashboardClient({
   const [existingUrls, setExistingUrls] = useState<Set<string>>(new Set());
   const [existingDescriptionsByName, setExistingDescriptionsByName] = useState<Record<string, string>>({});
   const [existingDescriptionsByUrl, setExistingDescriptionsByUrl] = useState<Record<string, string>>({});
+  const [existingImagesByName, setExistingImagesByName] = useState<Record<string, string>>({});
+  const [existingImagesByUrl, setExistingImagesByUrl] = useState<Record<string, string>>({});
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [parsedRows, setParsedRows] = useState<Record<string, unknown>[]>([]);
@@ -301,6 +319,8 @@ export default function DashboardClient({
         setExistingUrls(new Set((payload.existingUrls ?? []) as string[]));
         setExistingDescriptionsByName((payload.existingDescriptionsByName ?? {}) as Record<string, string>);
         setExistingDescriptionsByUrl((payload.existingDescriptionsByUrl ?? {}) as Record<string, string>);
+        setExistingImagesByName((payload.existingImagesByName ?? {}) as Record<string, string>);
+        setExistingImagesByUrl((payload.existingImagesByUrl ?? {}) as Record<string, string>);
       } catch (error) {
         setImportStatus(error instanceof Error ? error.message : "Eroare la încărcarea categoriilor.");
       }
@@ -334,7 +354,7 @@ export default function DashboardClient({
     // or re-imported unless the user explicitly checks it and picks an
     // overwrite mode.
     const existingFlags = typedRows.map((row) => {
-      const nameKey = pickRowValue(row, "name").trim().toLowerCase();
+      const nameKey = getProductName(row).trim().toLowerCase();
       const url = getProductUrl(row);
       return Boolean((nameKey && existingNames.has(nameKey)) || (url && existingUrls.has(url)));
     });
@@ -346,22 +366,36 @@ export default function DashboardClient({
     // already in Airtable instead of a blank cell — the admin edits it in
     // place rather than retyping it from scratch.
     const initialDescriptions: Record<number, string> = {};
+    // Same idea as the description prefill above, but for the gallery
+    // column: an existing product's current "Product Images" is split back
+    // into the same scrapedInfo[index].images shape the drag-drop/paste-URL
+    // gallery already uses, so re-importing shows (and lets the admin edit)
+    // what's already in Airtable instead of an empty drop zone.
+    const initialImages: Record<number, ScrapedInfo> = {};
     typedRows.forEach((row, index) => {
       if (!existingFlags[index]) return;
-      const nameKey = pickRowValue(row, "name").trim().toLowerCase();
+      const nameKey = getProductName(row).trim().toLowerCase();
       const url = getProductUrl(row);
       const existingDescription =
         (nameKey && existingDescriptionsByName[nameKey]) || (url && existingDescriptionsByUrl[url]) || "";
       if (existingDescription) initialDescriptions[index] = existingDescription;
+
+      const existingImages =
+        (nameKey && existingImagesByName[nameKey]) || (url && existingImagesByUrl[url]) || "";
+      const images = existingImages
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (images.length) initialImages[index] = { images };
     });
 
     setParsedRows(typedRows);
-    setRowCategories(typedRows.map((row) => guessCategoryForName(pickRowValue(row, "name"), categories)));
+    setRowCategories(typedRows.map((row) => guessCategoryForName(getProductName(row), categories)));
     setIncludedRows(existingFlags.map((isExisting) => !isExisting));
     setIsExistingRow(existingFlags);
     setColumnMapping(applyTemplateMapping(columns, matchedTemplate));
     setAppliedTemplateName(matchedTemplate?.name ?? null);
-    setScrapedInfo({});
+    setScrapedInfo(initialImages);
     setManualFieldValues({});
     setPendingFields({});
     setScrapedDescriptions(initialDescriptions);
@@ -401,6 +435,10 @@ export default function DashboardClient({
 
   function setColumnTarget(column: string, target: string) {
     setColumnMapping((current) => ({ ...current, [column]: target }));
+  }
+
+  function handleAutoMapProductUrl() {
+    setColumnMapping((current) => applyProductUrlAliasMapping(columns, current));
   }
 
   // Saves only the column -> field mapping (never the uploaded rows), keyed
@@ -517,6 +555,20 @@ export default function DashboardClient({
     return pickRowValue(row, "product url", "producturl", "url");
   }
 
+  // Mirrors getProductUrl above — a mapped "Name" column takes priority over
+  // the naive raw-key guess. Without this, a JSON export whose name column
+  // isn't literally called "name" (e.g. "Titlu", "Nume produs") never
+  // matched an existing Airtable product by name at all, silently skipping
+  // the Description/gallery prefill and the overwrite flow.
+  function getProductName(row: Record<string, unknown>): string {
+    const mappedColumn = columns.find((column) => columnMapping[column] === "Name");
+    if (mappedColumn) {
+      const value = row[mappedColumn];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return pickRowValue(row, "name");
+  }
+
   // Just opens the product page for the admin to read off values by hand —
   // no scraping. Price/Description/Image are filled in manually (or, for
   // images, dragged in from the opened tab).
@@ -529,15 +581,38 @@ export default function DashboardClient({
   // plain text) and appends it to the row's gallery. Feeds the same
   // scrapedInfo[index].images that buildImportRow already uses to fill
   // Image URL / Product Images on import.
-  function handleImageDrop(event: React.DragEvent<HTMLElement>, index: number) {
-    event.preventDefault();
-    const url = (event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain")).trim();
-    if (!/^https?:\/\//i.test(url)) return;
+  function addDroppedImage(index: number, url: string) {
+    const trimmed = url.trim();
+    if (!/^https?:\/\//i.test(trimmed)) return;
     setScrapedInfo((current) => {
       const images = current[index]?.images ?? [];
-      if (images.includes(url)) return current;
-      return { ...current, [index]: { images: [...images, url] } };
+      if (images.includes(trimmed)) return current;
+      return { ...current, [index]: { images: [...images, trimmed] } };
     });
+  }
+
+  function handleImageDrop(event: React.DragEvent<HTMLElement>, index: number) {
+    event.preventDefault();
+    const url = event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain");
+    addDroppedImage(index, url);
+  }
+
+  // Paste-URL fallback for the image cell — same target as drag-and-drop
+  // (scrapedInfo[index].images), for admins who'd rather copy/paste a URL
+  // than drag an <img> from another tab.
+  function handleImageUrlPaste(index: number, event: React.ClipboardEvent<HTMLInputElement>) {
+    const url = event.clipboardData.getData("text/plain");
+    if (!/^https?:\/\//i.test(url.trim())) return;
+    event.preventDefault();
+    addDroppedImage(index, url);
+    event.currentTarget.value = "";
+  }
+
+  function handleImageUrlSubmit(index: number, event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addDroppedImage(index, event.currentTarget.value);
+    event.currentTarget.value = "";
   }
 
   function removeDroppedImage(index: number, url: string) {
@@ -605,16 +680,18 @@ export default function DashboardClient({
       fields.Description = [descriptionPrefix, fields.Description].filter(Boolean).join("\n\n");
     }
 
-    if (isEmptyValue(fields["Image URL"]) && isEmptyValue(fields["Product Images"])) {
-      if (info?.images?.length) {
-        // The row's dragged-in gallery — the import route re-fetches each
-        // URL to re-host it, but this way the thumbnails shown in the table
-        // are exactly what gets imported.
-        fields["Image URL"] = fields["Image URL"] ?? info.images[0];
-        fields["Product Images"] = info.images.join(", ");
-      } else if (manual["Image URL"]) {
-        fields["Image URL"] = manual["Image URL"];
-      }
+    if (info?.images?.length) {
+      // The row's gallery (dragged/pasted-in, or prefilled from the existing
+      // Airtable record) always wins for "Product Images" — it was silently
+      // ignored before whenever a mapped JSON column already had SOME value
+      // for "Image URL", even a single-image one, so the multi-image gallery
+      // never reached Airtable. The import route re-fetches each URL to
+      // re-host it, but this way the thumbnails shown in the table are
+      // exactly what gets imported.
+      fields["Image URL"] = fields["Image URL"] ?? info.images[0];
+      fields["Product Images"] = info.images.join(", ");
+    } else if (isEmptyValue(fields["Image URL"]) && manual["Image URL"]) {
+      fields["Image URL"] = manual["Image URL"];
     }
 
     fields.Category = rowCategories[index];
@@ -650,20 +727,28 @@ export default function DashboardClient({
       if (missing.length > 0) nextPendingFields[index] = missing;
     }
 
+    // No longer blocks the import — a field with no source data (no mapped
+    // column, or the mapped column is empty for this row) just gets written
+    // to Airtable as empty. The admin still sees exactly which field(s) on
+    // which product(s) were left blank, and the product pages still open so
+    // they can fill them in afterward via "Verificare" if they want to.
     const pendingIndexes = Object.keys(nextPendingFields).map(Number);
+    setPendingFields(nextPendingFields);
+    let missingFieldsNote = "";
     if (pendingIndexes.length > 0) {
-      setPendingFields(nextPendingFields);
       for (const index of pendingIndexes) {
         const url = getProductUrl(parsedRows[index]);
         if (url) window.open(url, "_blank", "noopener,noreferrer");
       }
-      setImportStatus(
-        `Câteva câmpuri lipsesc pentru ${pendingIndexes.length} produs(e) — am deschis paginile lor. Completează câmpurile marcate în tabel, apoi apasă din nou Importă.`
-      );
-      setIsImporting(false);
-      return;
+      const details = pendingIndexes
+        .map((index) => {
+          const productName = getProductName(parsedRows[index]) || `rândul ${index + 1}`;
+          const fieldLabels = nextPendingFields[index].map((field) => MISSING_FIELD_LABELS[field]).join(", ");
+          return `${productName}: ${fieldLabels}`;
+        })
+        .join(" · ");
+      missingFieldsNote = ` Câmpuri lăsate goale (fără coloană mapată sau rând gol) — ${details}.`;
     }
-    setPendingFields({});
 
     try {
       const rows = selectedIndexes.map((index) => buildImportRow(index));
@@ -693,7 +778,7 @@ export default function DashboardClient({
       setImportStatus(
         (payload.overwritten
           ? `${payload.imported} produse importate (${payload.overwritten} suprascrise).`
-          : `${payload.imported} produse importate.`) + overwritePrompt
+          : `${payload.imported} produse importate.`) + overwritePrompt + missingFieldsNote
       );
       setImportErrors(payload.errors ?? []);
       setImportDuplicates(payload.duplicates ?? []);
@@ -801,6 +886,13 @@ export default function DashboardClient({
                       className="mt-4 inline-flex items-center rounded border border-[#d8d0c5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
                     >
                       Salvează șablon (mapare coloane)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAutoMapProductUrl}
+                      className="ml-2 mt-4 inline-flex items-center rounded border border-black bg-yellow-400 p-[3px] text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300"
+                    >
+                      Mapează URL Produs
                     </button>
                     <div className="mt-6 overflow-x-auto border border-[#e6e3e5]">
                       <table className="min-w-full border-collapse text-xs">
@@ -978,6 +1070,13 @@ export default function DashboardClient({
                                     <span className="self-center text-[10px] text-[#6b676b]">trage o imagine aici</span>
                                   )}
                                 </div>
+                                <input
+                                  type="text"
+                                  placeholder="sau lipește URL imagine"
+                                  className="mt-1 w-28 rounded border border-[#d8d0c5] px-1 py-0.5 text-[10px]"
+                                  onPaste={(event) => handleImageUrlPaste(index, event)}
+                                  onKeyDown={(event) => handleImageUrlSubmit(index, event)}
+                                />
                               </td>
                               <td className="max-w-xs px-3 py-2 align-top">
                                 <textarea

@@ -18,6 +18,8 @@ export async function GET() {
     existingUrls: Array.from(existing.byUrl.keys()),
     existingDescriptionsByName: Object.fromEntries(existing.descriptionByName),
     existingDescriptionsByUrl: Object.fromEntries(existing.descriptionByUrl),
+    existingImagesByName: Object.fromEntries(existing.imagesByName),
+    existingImagesByUrl: Object.fromEntries(existing.imagesByUrl),
   });
 }
 

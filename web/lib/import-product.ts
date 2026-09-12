@@ -353,8 +353,8 @@ export async function importProductRow(
   let fields: Record<string, unknown>;
   if (overwrite === "images") {
     fields = {
-      ...(uploadedImages.length ? { "Image URL": uploadedImages[0] } : {}),
-      ...(uploadedImages.length > 1 ? { "Product Images": uploadedImages.join(", ") } : {}),
+      "Image URL": uploadedImages[0] ?? "",
+      "Product Images": uploadedImages.join(", "),
     };
   } else {
     const priceNow = toNumber(pick(row, "Price", "price"));
@@ -377,8 +377,8 @@ export async function importProductRow(
       Discount: discount,
       Currency: pick(row, "Currency", "currency") === "USD" ? "USD" : "RON",
       "Product URL": productUrl,
-      ...(includeImages && uploadedImages.length ? { "Image URL": uploadedImages[0] } : {}),
-      ...(includeImages && uploadedImages.length > 1 ? { "Product Images": uploadedImages.join(", ") } : {}),
+      ...(includeImages ? { "Image URL": uploadedImages[0] ?? "" } : {}),
+      ...(includeImages ? { "Product Images": uploadedImages.join(", ") } : {}),
     };
   }
 

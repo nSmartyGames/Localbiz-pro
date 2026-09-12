@@ -165,15 +165,18 @@ export type ExistingProductIndex = {
   byUrl: Map<string, string>;
   descriptionByName: Map<string, string>;
   descriptionByUrl: Map<string, string>;
+  imagesByName: Map<string, string>;
+  imagesByUrl: Map<string, string>;
 };
 
 // Existence check for the Sync page's duplicate-import guard — id-aware
 // (unlike a plain name/URL set) so a matched row can be overwritten via
 // PATCH instead of only ever being skipped. Pulls only Name/Product
-// URL/Description (not full records) across every category, since a
-// duplicate could land in any category, not just the storefront ones. The
-// description maps let the Sync page prefill an existing product's current
-// Description when a row matches it, so re-importing doesn't blank it out.
+// URL/Description/Product Images (not full records) across every category,
+// since a duplicate could land in any category, not just the storefront
+// ones. The description/images maps let the Sync page prefill an existing
+// product's current Description and image gallery when a row matches it,
+// so re-importing doesn't blank either one out.
 export async function getExistingProductIndex(): Promise<ExistingProductIndex> {
   const apiKey = process.env.AIRTABLE_API_KEY;
   const baseId = process.env.AIRTABLE_BASE_ID;
@@ -181,7 +184,9 @@ export async function getExistingProductIndex(): Promise<ExistingProductIndex> {
   const byUrl = new Map<string, string>();
   const descriptionByName = new Map<string, string>();
   const descriptionByUrl = new Map<string, string>();
-  if (!apiKey || !baseId) return { byName, byUrl, descriptionByName, descriptionByUrl };
+  const imagesByName = new Map<string, string>();
+  const imagesByUrl = new Map<string, string>();
+  if (!apiKey || !baseId) return { byName, byUrl, descriptionByName, descriptionByUrl, imagesByName, imagesByUrl };
 
   const table = encodeURIComponent(process.env.AIRTABLE_PRODUCTS_TABLE ?? "Products");
   let offset: string | undefined;
@@ -192,11 +197,15 @@ export async function getExistingProductIndex(): Promise<ExistingProductIndex> {
     url.searchParams.append("fields[]", "Name");
     url.searchParams.append("fields[]", "Product URL");
     url.searchParams.append("fields[]", "Description");
+    url.searchParams.append("fields[]", "Product Images");
     if (offset) url.searchParams.set("offset", offset);
     const response = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` }, cache: "no-store" });
     if (!response.ok) break;
     const payload = (await response.json()) as {
-      records?: Array<{ id: string; fields?: { Name?: string; "Product URL"?: string; Description?: string } }>;
+      records?: Array<{
+        id: string;
+        fields?: { Name?: string; "Product URL"?: string; Description?: string; "Product Images"?: string };
+      }>;
       offset?: string;
     };
     for (const record of payload.records ?? []) {
@@ -205,16 +214,22 @@ export async function getExistingProductIndex(): Promise<ExistingProductIndex> {
         const key = fields.Name.trim().toLowerCase();
         byName.set(key, record.id);
         if (typeof fields.Description === "string" && fields.Description) descriptionByName.set(key, fields.Description);
+        if (typeof fields["Product Images"] === "string" && fields["Product Images"]) {
+          imagesByName.set(key, fields["Product Images"]);
+        }
       }
       if (typeof fields["Product URL"] === "string" && fields["Product URL"]) {
         byUrl.set(fields["Product URL"], record.id);
         if (typeof fields.Description === "string" && fields.Description) descriptionByUrl.set(fields["Product URL"], fields.Description);
+        if (typeof fields["Product Images"] === "string" && fields["Product Images"]) {
+          imagesByUrl.set(fields["Product URL"], fields["Product Images"]);
+        }
       }
     }
     offset = payload.offset;
   } while (offset);
 
-  return { byName, byUrl, descriptionByName, descriptionByUrl };
+  return { byName, byUrl, descriptionByName, descriptionByUrl, imagesByName, imagesByUrl };
 }
 
 // Writes a refreshed Product back onto its Airtable record. Used by the

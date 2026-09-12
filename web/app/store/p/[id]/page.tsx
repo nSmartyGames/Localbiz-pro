@@ -204,24 +204,29 @@ export default function ProductPage({
             onClick={() => setIsDescriptionOpen(false)}
             aria-hidden="true"
           />
-          <div className="relative flex h-full w-full max-w-md flex-col overflow-y-auto bg-white p-6 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-medium text-[#242124]">Detalii produs</h2>
+          <div className="relative flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-[#b08d57]/30 bg-[#fdfcfb] p-8 shadow-2xl">
+            <div className="mb-6 flex items-start justify-between border-b border-[#e6e3e5] pb-5">
+              <div>
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b08d57]">
+                  Produs
+                </div>
+                <h2 className="text-xl font-medium tracking-wide text-[#242124]">Detalii produs</h2>
+              </div>
               <button
                 type="button"
                 onClick={() => setIsDescriptionOpen(false)}
-                className="text-2xl leading-none text-[#6b676b] hover:text-[#242124]"
+                className="-translate-x-[30px] rounded-full p-2 text-4xl leading-none text-[#6b676b] transition-colors hover:bg-[#f8f7f6] hover:text-[#301934]"
                 aria-label="Închide"
               >
                 &times;
               </button>
             </div>
             {extraInfo && (
-              <div className="mb-4 whitespace-pre-line border-b border-[#e6e3e5] pb-4 text-sm text-[#6b676b]">
+              <div className="mb-5 whitespace-pre-line border-b border-[#e6e3e5] pb-5 text-sm leading-relaxed text-[#6b676b]">
                 {extraInfo}
               </div>
             )}
-            <div className="whitespace-pre-line text-[15px] leading-relaxed text-[#3d393d]">
+            <div className="whitespace-pre-line text-[15px] leading-[1.85] text-[#3d393d]">
               {mainDescription || "Fără descriere disponibilă."}
             </div>
           </div>
