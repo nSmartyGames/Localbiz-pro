@@ -210,16 +210,6 @@ type ScrapedInfo = { images: string[] };
 // overwrite stays supported server-side but isn't surfaced in this UI.
 type OverwriteMode = "images" | "allWithoutImages" | "all";
 
-// The fields the Sync page will pause and ask a human about when neither
-// the JSON columns nor the product-page scrape can supply them.
-type MissingFieldKey = "Price" | "Description" | "Image URL";
-
-const MISSING_FIELD_LABELS: Record<MissingFieldKey, string> = {
-  Price: "Preț (RON)",
-  Description: "Descriere",
-  "Image URL": "URL imagine",
-};
-
 function DashboardEmailForm() {
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("Actualizare LaVive");
@@ -296,8 +286,6 @@ export default function DashboardClient({
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [importDuplicates, setImportDuplicates] = useState<string[]>([]);
   const [scrapedInfo, setScrapedInfo] = useState<Record<number, ScrapedInfo>>({});
-  const [manualFieldValues, setManualFieldValues] = useState<Record<number, Partial<Record<MissingFieldKey, string>>>>({});
-  const [pendingFields, setPendingFields] = useState<Record<number, MissingFieldKey[]>>({});
   const [scrapedDescriptions, setScrapedDescriptions] = useState<Record<number, string>>({});
   const [emails, setEmails] = useState<MailItem[]>([]);
   const [mailStatus, setMailStatus] = useState<string | null>(null);
@@ -396,8 +384,6 @@ export default function DashboardClient({
     setColumnMapping(applyTemplateMapping(columns, matchedTemplate));
     setAppliedTemplateName(matchedTemplate?.name ?? null);
     setScrapedInfo(initialImages);
-    setManualFieldValues({});
-    setPendingFields({});
     setScrapedDescriptions(initialDescriptions);
   }
 
@@ -622,62 +608,17 @@ export default function DashboardClient({
     }));
   }
 
-  // Checks one row for the fields the Sync page cares about (Price,
-  // Description, Image URL), given the already-mapped JSON columns plus
-  // whatever the product-page scrape and/or a manual entry supplied. For a
-  // row overwriting an existing product, only the fields that overwrite
-  // mode actually touches are checked — "images" doesn't care about
-  // Price/Description, "allWithoutImages" doesn't care about Image URL.
-  function detectMissingFields(
-    index: number,
-    info: ScrapedInfo | undefined,
-    manual: Partial<Record<MissingFieldKey, string>>
-  ): MissingFieldKey[] {
-    const row = parsedRows[index];
-    const fields = buildFinalRow(row);
-    const mode = isExistingRow[index] ? overwriteModes[index] ?? "all" : undefined;
-    const missing: MissingFieldKey[] = [];
-
-    if (mode !== "images") {
-      const hasPrice = !isEmptyValue(fields.Price) || Boolean(manual.Price);
-      if (!hasPrice) missing.push("Price");
-
-      const hasDescription = !isEmptyValue(fields.Description) || Boolean(manual.Description) || Boolean(scrapedDescriptions[index]);
-      if (!hasDescription) missing.push("Description");
-    }
-
-    if (mode !== "allWithoutImages") {
-      // fields["Image URL"]/["Product Images"] reflect whatever column the
-      // user actually mapped to those targets. An unmapped raw key (e.g. the
-      // scraper's own "images" field) does NOT count as present here — it
-      // never reaches buildFinalRow's output, so trusting it made this check
-      // pass while the actual Airtable write ended up with no image at all.
-      const hasImage =
-        !isEmptyValue(fields["Image URL"]) ||
-        !isEmptyValue(fields["Product Images"]) ||
-        Boolean(manual["Image URL"]) ||
-        Boolean(info?.images?.length);
-      if (!hasImage) missing.push("Image URL");
-    }
-
-    return missing;
-  }
-
   // Builds the Airtable-shaped row for one product, filling in whatever a
-  // manually typed value (or a dragged-in image) supplied for fields the
-  // JSON's own columns didn't carry.
+  // dragged/pasted-in image supplied for fields the JSON's own columns
+  // didn't carry. Fields with no source data at all (no mapped column, or
+  // the row's own value is empty — not every product has a price) are
+  // simply left out, not treated as an error to fix before importing.
   function buildImportRow(index: number): Record<string, unknown> {
     const fields = buildFinalRow(parsedRows[index]);
     const info = scrapedInfo[index];
-    const manual = manualFieldValues[index] ?? {};
 
-    if (isEmptyValue(fields.Price) && manual.Price) {
-      fields.Price = manual.Price;
-    }
-
-    const descriptionPrefix = scrapedDescriptions[index] || (isEmptyValue(fields.Description) ? manual.Description : undefined);
-    if (descriptionPrefix) {
-      fields.Description = [descriptionPrefix, fields.Description].filter(Boolean).join("\n\n");
+    if (scrapedDescriptions[index]) {
+      fields.Description = [scrapedDescriptions[index], fields.Description].filter(Boolean).join("\n\n");
     }
 
     if (info?.images?.length) {
@@ -690,8 +631,6 @@ export default function DashboardClient({
       // exactly what gets imported.
       fields["Image URL"] = fields["Image URL"] ?? info.images[0];
       fields["Product Images"] = info.images.join(", ");
-    } else if (isEmptyValue(fields["Image URL"]) && manual["Image URL"]) {
-      fields["Image URL"] = manual["Image URL"];
     }
 
     fields.Category = rowCategories[index];
@@ -715,40 +654,6 @@ export default function DashboardClient({
     setImportStatus(null);
     setImportErrors([]);
     setImportDuplicates([]);
-
-    // Before building the import payload, check whether Price, Description,
-    // and Image URL all have a value from somewhere — mapped column, a
-    // dragged-in image, or a manual entry. Anything still missing gets
-    // flagged: open the page for a human to read it off of, and stop short
-    // of importing until every flagged field is filled in by hand.
-    const nextPendingFields: Record<number, MissingFieldKey[]> = {};
-    for (const index of selectedIndexes) {
-      const missing = detectMissingFields(index, scrapedInfo[index], manualFieldValues[index] ?? {});
-      if (missing.length > 0) nextPendingFields[index] = missing;
-    }
-
-    // No longer blocks the import — a field with no source data (no mapped
-    // column, or the mapped column is empty for this row) just gets written
-    // to Airtable as empty. The admin still sees exactly which field(s) on
-    // which product(s) were left blank, and the product pages still open so
-    // they can fill them in afterward via "Verificare" if they want to.
-    const pendingIndexes = Object.keys(nextPendingFields).map(Number);
-    setPendingFields(nextPendingFields);
-    let missingFieldsNote = "";
-    if (pendingIndexes.length > 0) {
-      for (const index of pendingIndexes) {
-        const url = getProductUrl(parsedRows[index]);
-        if (url) window.open(url, "_blank", "noopener,noreferrer");
-      }
-      const details = pendingIndexes
-        .map((index) => {
-          const productName = getProductName(parsedRows[index]) || `rândul ${index + 1}`;
-          const fieldLabels = nextPendingFields[index].map((field) => MISSING_FIELD_LABELS[field]).join(", ");
-          return `${productName}: ${fieldLabels}`;
-        })
-        .join(" · ");
-      missingFieldsNote = ` Câmpuri lăsate goale (fără coloană mapată sau rând gol) — ${details}.`;
-    }
 
     try {
       const rows = selectedIndexes.map((index) => buildImportRow(index));
@@ -778,7 +683,7 @@ export default function DashboardClient({
       setImportStatus(
         (payload.overwritten
           ? `${payload.imported} produse importate (${payload.overwritten} suprascrise).`
-          : `${payload.imported} produse importate.`) + overwritePrompt + missingFieldsNote
+          : `${payload.imported} produse importate.`) + overwritePrompt
       );
       setImportErrors(payload.errors ?? []);
       setImportDuplicates(payload.duplicates ?? []);
@@ -1014,34 +919,14 @@ export default function DashboardClient({
                                 );
                               })}
                               <td className="whitespace-nowrap px-3 py-2 align-top">
-                                {pendingFields[index]?.length ? (
-                                  <div className="grid gap-1">
-                                    {pendingFields[index].map((field) => (
-                                      <input
-                                        key={field}
-                                        type={field === "Price" ? "number" : "text"}
-                                        inputMode={field === "Price" ? "decimal" : undefined}
-                                        placeholder={MISSING_FIELD_LABELS[field]}
-                                        value={manualFieldValues[index]?.[field] ?? ""}
-                                        onChange={(event) =>
-                                          setManualFieldValues((current) => ({
-                                            ...current,
-                                            [index]: { ...current[index], [field]: event.target.value },
-                                          }))
-                                        }
-                                        className="w-32 border border-[#d8d0c5] bg-white px-2 py-1 text-xs"
-                                      />
-                                    ))}
-                                    {getProductUrl(row) && (
-                                      <button
-                                        type="button"
-                                        onClick={() => openProductPage(getProductUrl(row))}
-                                        className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
-                                      >
-                                        {getSiteLabel(getProductUrl(row))}
-                                      </button>
-                                    )}
-                                  </div>
+                                {getProductUrl(row) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openProductPage(getProductUrl(row))}
+                                    className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
+                                  >
+                                    {getSiteLabel(getProductUrl(row))}
+                                  </button>
                                 ) : (
                                   <span className="text-[#6b676b]">—</span>
                                 )}
