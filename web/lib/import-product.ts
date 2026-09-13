@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { Storage } from "@google-cloud/storage";
 import type { ExistingProductIndex } from "@/lib/airtable-products";
 
@@ -245,11 +246,23 @@ async function uploadImage(imageUrl: string, productId: string, index = 0) {
   if (!imageResponse.ok) throw new Error(`Image could not be downloaded: ${imageUrl}`);
   const contentType = imageResponse.headers.get("content-type")?.split(";")[0] || "image/jpeg";
   const extension = contentType.split("/")[1] || "jpg";
-  const objectName = `products/${productId}${index ? `-${index}` : ""}.${extension}`;
+  const buffer = Buffer.from(await imageResponse.arrayBuffer());
+  // Content-hashed name: a re-import whose source image actually changed
+  // (e.g. a scraper fix now pulling a bigger version of the same photo)
+  // gets a brand-new object, so the "immutable, 1-year" Cache-Control below
+  // never needs to be invalidated — it's set once, on a URL guaranteed to
+  // always point at exactly these bytes. The old scheme (name = productId
+  // only) overwrote the SAME "immutable" URL with different bytes on every
+  // re-import, which left GCS's own edge cache, Next.js's Image Optimizer
+  // cache, and every visitor's browser cache serving the stale image for up
+  // to a year — Airtable and the bucket both had the new image, but nothing
+  // that had ever fetched the old URL would know to ask again.
+  const hash = createHash("sha1").update(buffer).digest("hex").slice(0, 10);
+  const objectName = `products/${productId}-${hash}${index ? `-${index}` : ""}.${extension}`;
   await storage
     .bucket(bucket)
     .file(objectName)
-    .save(Buffer.from(await imageResponse.arrayBuffer()), {
+    .save(buffer, {
       resumable: false,
       metadata: {
         contentType,

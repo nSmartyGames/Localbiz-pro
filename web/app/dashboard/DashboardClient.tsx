@@ -204,15 +204,17 @@ function getSiteLabel(url: string): string {
 type ScrapedInfo = { images: string[] };
 
 // Douglas returns a deceptive Akamai 400 to any plain fetch/curl regardless
-// of headers — only a real browser's TLS/JS fingerprint gets past the bot
-// check. douglas-scraper/server.js runs that real browser locally (next to
-// whichever machine the admin has the dashboard open on) and exposes it over
-// a small local HTTP bridge; this is just the client for it.
-const DOUGLAS_BRIDGE_URL = "http://localhost:5391";
+// of headers, and notino.ro shows a Cloudflare "managed challenge"
+// interstitial — only a real browser gets past either. douglas-scraper/
+// server.js runs that real browser locally (next to whichever machine the
+// admin has the dashboard open on) and exposes it over a small local HTTP
+// bridge; this is just the client for it.
+const LOCAL_BRIDGE_URL = "http://localhost:5391";
+const LOCAL_BRIDGE_HOSTS = /(^|\.)(douglas\.ro|notino\.ro)$/i;
 
-function isDouglasUrl(url: string): boolean {
+function needsLocalBridge(url: string): boolean {
   try {
-    return /(^|\.)douglas\.ro$/i.test(new URL(url).hostname);
+    return LOCAL_BRIDGE_HOSTS.test(new URL(url).hostname);
   } catch {
     return false;
   }
@@ -307,6 +309,8 @@ export default function DashboardClient({
   const [existingImagesByUrl, setExistingImagesByUrl] = useState<Record<string, string>>({});
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteHasHeader, setPasteHasHeader] = useState(true);
   const [parsedRows, setParsedRows] = useState<Record<string, unknown>[]>([]);
   const [rowCategories, setRowCategories] = useState<string[]>([]);
   const [includedRows, setIncludedRows] = useState<boolean[]>([]);
@@ -323,7 +327,8 @@ export default function DashboardClient({
   const [scrapedInfo, setScrapedInfo] = useState<Record<number, ScrapedInfo>>({});
   const [scrapedDescriptions, setScrapedDescriptions] = useState<Record<number, string>>({});
   const [scrapedPrices, setScrapedPrices] = useState<Record<number, { now: number | null; old: number | null }>>({});
-  const [douglasScrapeStatus, setDouglasScrapeStatus] = useState<Record<number, string>>({});
+  const [scrapedNames, setScrapedNames] = useState<Record<number, string>>({});
+  const [scrapeStatus, setScrapeStatus] = useState<Record<number, string>>({});
   const [newProductUrl, setNewProductUrl] = useState("");
   const [isAddingProductByUrl, setIsAddingProductByUrl] = useState(false);
   const [addProductUrlError, setAddProductUrlError] = useState<string | null>(null);
@@ -368,7 +373,8 @@ export default function DashboardClient({
     setColumnMapping({});
     setAppliedTemplateName(null);
     setScrapedPrices({});
-    setDouglasScrapeStatus({});
+    setScrapedNames({});
+    setScrapeStatus({});
     setFileName(name);
   }
 
@@ -376,7 +382,7 @@ export default function DashboardClient({
   // newlines, or escaped quotes) into the same Record<string, unknown>[]
   // shape a JSON array of products used to produce, so applyParsedRows and
   // recordRecentFile need no changes.
-  function parseCsvRows(text: string): Record<string, unknown>[] {
+  function parseDelimitedRows(text: string, delimiter: string): string[][] {
     const rows: string[][] = [];
     let row: string[] = [];
     let field = "";
@@ -398,7 +404,7 @@ export default function DashboardClient({
       }
       if (char === '"') {
         inQuotes = true;
-      } else if (char === ",") {
+      } else if (char === delimiter) {
         row.push(field);
         field = "";
       } else if (char === "\n" || char === "\r") {
@@ -415,13 +421,128 @@ export default function DashboardClient({
       row.push(field);
       rows.push(row);
     }
-    const nonEmptyRows = rows.filter((cells) => cells.some((cell) => cell.trim() !== ""));
+    return rows.filter((cells) => cells.some((cell) => cell.trim() !== ""));
+  }
+
+  function parseCsvRows(text: string): Record<string, unknown>[] {
+    const nonEmptyRows = parseDelimitedRows(text, ",");
     if (nonEmptyRows.length < 2) return [];
     const headers = nonEmptyRows[0].map((header) => header.trim());
     return nonEmptyRows.slice(1).map((cells) => {
       const record: Record<string, unknown> = {};
       headers.forEach((header, index) => {
         if (header) record[header] = cells[index] ?? "";
+      });
+      return record;
+    });
+  }
+
+  // Excel/Sheets copy-paste is tab-separated; falls back to comma if no tabs
+  // are present (e.g. a CSV snippet pasted instead of a real spreadsheet range).
+  function detectPasteDelimiter(text: string): string {
+    return text.includes("\t") ? "\t" : ",";
+  }
+
+  // A bare domain like "notino.ro" (no slashes, no spaces) — used to spot a
+  // site/path pair split across two lines in a vertical listing paste.
+  const BARE_DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)+$/i;
+
+  // A block's 2nd and 3rd fields (right after the leading index number) are
+  // collapsed into one absolute-URL field when they look like a domain
+  // followed by a path — e.g. "notino.ro" / "/afnan/9-pm.../" becomes
+  // "https://notino.ro/afnan/9-pm.../" — since that pair is really one
+  // product field (its page URL), not two.
+  function mergeSitePathFields(fields: string[]): string[] {
+    if (fields.length < 3) return fields;
+    const [index, site, path, ...rest] = fields;
+    if (BARE_DOMAIN.test(site) && path.startsWith("/")) {
+      return [index, `https://${site}${path}`, ...rest];
+    }
+    return fields;
+  }
+
+  // Some listing sites (e.g. a product grid copy-pasted from Notino) paste
+  // as one value per line, in repeating fixed-size blocks, each block
+  // starting with that product's position number ("1", "2", "3", ...,
+  // ascending or descending) followed by a bare domain line ("notino.ro").
+  // Blocks are anchored on the domain line rather than the leading number,
+  // because several other fields in the same block (price, review count)
+  // are ALSO plain integers — anchoring on "any numeric line" mistakes
+  // those for block boundaries too. A domain string is a much rarer shape
+  // to collide with. Without this, the generic delimiter parser below
+  // treats every line as its own single-column row instead of reshaping
+  // the fields into one row per product.
+  function parseVerticalRecordRows(text: string): Record<string, unknown>[] | null {
+    const lines = text
+      .split(/\r\n|\r|\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length < 4) return null;
+
+    const domainPositions = lines.reduce<number[]>((positions, line, i) => {
+      if (BARE_DOMAIN.test(line)) positions.push(i);
+      return positions;
+    }, []);
+    if (domainPositions.length === 0) return null;
+    if (domainPositions[0] < 1 || !/^\d+$/.test(lines[domainPositions[0] - 1])) return null;
+
+    const blockStarts = domainPositions.map((position) => position - 1);
+    let blockSize: number;
+    if (blockStarts.length === 1) {
+      blockSize = lines.length - blockStarts[0];
+    } else {
+      blockSize = blockStarts[1] - blockStarts[0];
+      if (blockSize < 3) return null;
+      const step = Number(lines[blockStarts[1]]) - Number(lines[blockStarts[0]]);
+      if (Math.abs(step) !== 1) return null;
+      for (let i = 1; i < blockStarts.length; i++) {
+        if (blockStarts[i] - blockStarts[i - 1] !== blockSize) return null;
+        if (!/^\d+$/.test(lines[blockStarts[i]])) return null;
+        if (Number(lines[blockStarts[i]]) - Number(lines[blockStarts[i - 1]]) !== step) return null;
+      }
+    }
+
+    const usableStarts = blockStarts.filter((position) => position + blockSize <= lines.length);
+    const mergedBlocks = usableStarts.map((position) => mergeSitePathFields(lines.slice(position, position + blockSize)));
+    const columnCount = Math.max(...mergedBlocks.map((block) => block.length));
+    const headers = Array.from({ length: columnCount }, (_, index) => `Col${index + 1}`);
+    return mergedBlocks.map((fields) => {
+      const record: Record<string, unknown> = {};
+      headers.forEach((header, index) => {
+        record[header] = fields[index] ?? "";
+      });
+      return record;
+    });
+  }
+
+  // Mirrors parseCsvRows's output shape, but for arbitrary Excel/Sheets
+  // paste content: delimiter is auto-detected (tab, falling back to comma),
+  // and a header row is optional — when absent (per the caller's hasHeader
+  // choice), columns are auto-named Col1, Col2, ... in column order.
+  //
+  // Whether a header row is used is always an explicit choice (the "Prima
+  // linie conține anteturi" checkbox), never guessed: a heuristic guess
+  // (e.g. "numeric first cell means data") silently swallows a real data
+  // row as a header whenever that row happens to be all text, shifting
+  // every row after it out of alignment with its intended column.
+  //
+  // columnCount is taken across ALL rows, not just the header row, so a
+  // ragged paste (a data row longer than the header row) still gets every
+  // column an auto-named header instead of silently dropping the overflow.
+  function parsePastedRows(text: string, hasHeader: boolean): Record<string, unknown>[] {
+    const verticalRows = parseVerticalRecordRows(text);
+    if (verticalRows) return verticalRows;
+
+    const nonEmptyRows = parseDelimitedRows(text, detectPasteDelimiter(text));
+    if (nonEmptyRows.length === 0) return [];
+    const columnCount = Math.max(...nonEmptyRows.map((cells) => cells.length));
+    const headerRow = hasHeader ? nonEmptyRows[0] : [];
+    const headers = Array.from({ length: columnCount }, (_, index) => headerRow[index]?.trim() || `Col${index + 1}`);
+    const dataRows = hasHeader ? nonEmptyRows.slice(1) : nonEmptyRows;
+    return dataRows.map((cells) => {
+      const record: Record<string, unknown> = {};
+      headers.forEach((header, index) => {
+        record[header] = cells[index] ?? "";
       });
       return record;
     });
@@ -509,6 +630,18 @@ export default function DashboardClient({
   function handleReopenRecentFile(entry: RecentFile) {
     resetImportState(entry.name);
     applyParsedRows(entry.rows);
+  }
+
+  function handlePasteImport() {
+    resetImportState("Lipit din clipboard");
+    try {
+      const typedRows = parsePastedRows(pasteText, pasteHasHeader);
+      if (typedRows.length === 0) throw new Error("Conținutul lipit trebuie să conțină cel puțin un rând.");
+      applyParsedRows(typedRows);
+      recordRecentFile("Lipit din clipboard", typedRows);
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : "Conținutul lipit nu a putut fi interpretat.");
+    }
   }
 
   function setRowCategory(index: number, category: string) {
@@ -625,7 +758,8 @@ export default function DashboardClient({
   // true, otherwise there's nothing valid to overwrite with yet.
   function isRowValidForImport(index: number): boolean {
     const fields = buildFinalRow(parsedRows[index]);
-    return !isEmptyValue(fields.Name) && Boolean(rowCategories[index]);
+    const name = isEmptyValue(fields.Name) ? scrapedNames[index] : fields.Name;
+    return !isEmptyValue(name) && Boolean(rowCategories[index]);
   }
 
   function getProductUrl(row: Record<string, unknown>): string {
@@ -658,26 +792,35 @@ export default function DashboardClient({
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
-  // Calls the local douglas-scraper bridge (see douglas-scraper/server.js) —
-  // a real headless Chrome running on the admin's own machine, since Douglas
-  // blocks any plain fetch. Fills the same scrapedInfo/scrapedDescriptions
-  // gallery + description state the drag-drop flow already writes to, plus
-  // the row's price, without touching whatever the JSON's own columns
-  // already mapped.
-  async function handleDouglasScrape(index: number) {
+  // Fills in whatever a row is currently missing — Name, Price/Old Price,
+  // Description, and gallery images — straight from the product's own page,
+  // for ANY site the row's Product URL points to. Sites in
+  // LOCAL_BRIDGE_HOSTS (Douglas, Notino) go through the local headless-Chrome
+  // bridge (see douglas-scraper/server.js), since a plain fetch there just
+  // gets a bot-check block page; every other site uses the
+  // serverless-friendly /api/scrape-product route. Writes into the same
+  // scrapedInfo/scrapedDescriptions/scrapedPrices/scrapedNames state the
+  // drag-drop gallery and buildImportRow's blank-filling already read from,
+  // so a column the admin (or an earlier CSV/paste) already mapped a real
+  // value into is never overwritten — only actually-blank fields get filled.
+  async function handleScrapeRow(index: number) {
     const url = getProductUrl(parsedRows[index]);
-    if (!url || !isDouglasUrl(url)) return;
+    if (!url) return;
+    const useLocalBridge = needsLocalBridge(url);
 
-    setDouglasScrapeStatus((current) => ({ ...current, [index]: "loading" }));
+    setScrapeStatus((current) => ({ ...current, [index]: "loading" }));
     try {
-      const response = await fetch(`${DOUGLAS_BRIDGE_URL}/scrape`, {
+      const response = await fetch(useLocalBridge ? `${LOCAL_BRIDGE_URL}/scrape` : "/dpstore/api/scrape-product", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
-      const payload = (await response.json()) as DouglasScrapeResult & { error?: string };
+      const payload = (await response.json()) as (ScrapeProductResult | DouglasScrapeResult) & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Scraping a eșuat.");
 
+      if (payload.name?.trim()) {
+        setScrapedNames((current) => ({ ...current, [index]: payload.name!.trim() }));
+      }
       if (payload.images?.length) {
         setScrapedInfo((current) => {
           const existingImages = current[index]?.images ?? [];
@@ -691,18 +834,21 @@ export default function DashboardClient({
       if (payload.priceNow !== null || payload.priceOld !== null) {
         setScrapedPrices((current) => ({ ...current, [index]: { now: payload.priceNow, old: payload.priceOld } }));
       }
-      setDouglasScrapeStatus((current) => ({ ...current, [index]: "ok" }));
+      setScrapeStatus((current) => ({ ...current, [index]: "ok" }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper).";
-      setDouglasScrapeStatus((current) => ({ ...current, [index]: message }));
+      const fallback = useLocalBridge
+        ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)."
+        : "Eroare la scraping.";
+      const message = error instanceof Error && error.message !== "Failed to fetch" ? error.message : fallback;
+      setScrapeStatus((current) => ({ ...current, [index]: message }));
     }
   }
 
-  // Standalone "paste a URL, get a new row" flow — unlike handleDouglasScrape
+  // Standalone "paste a URL, get a new row" flow — unlike handleScrapeRow
   // above (which only fills in gaps on a row a CSV/JSON import already
   // produced), this creates the row itself from nothing but the pasted URL.
-  // For a Douglas URL this goes through the same local bridge as
-  // handleDouglasScrape (plain fetch gets an Akamai block page there, which
+  // A LOCAL_BRIDGE_HOSTS URL goes through the same local bridge as
+  // handleScrapeRow (plain fetch gets a bot-check block page there, which
   // has no product name/price/JSON-LD to read) — everything else uses the
   // serverless-friendly (no headless browser) /api/scrape-product route.
   async function handleAddProductFromUrl() {
@@ -714,9 +860,9 @@ export default function DashboardClient({
 
     setIsAddingProductByUrl(true);
     setAddProductUrlError(null);
-    const useDouglasBridge = isDouglasUrl(url);
+    const useLocalBridge = needsLocalBridge(url);
     try {
-      const response = await fetch(useDouglasBridge ? `${DOUGLAS_BRIDGE_URL}/scrape` : "/dpstore/api/scrape-product", {
+      const response = await fetch(useLocalBridge ? `${LOCAL_BRIDGE_URL}/scrape` : "/dpstore/api/scrape-product", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
@@ -724,7 +870,7 @@ export default function DashboardClient({
       const payload = (await response.json()) as (ScrapeProductResult | DouglasScrapeResult) & { error?: string };
       if (!response.ok) {
         throw new Error(
-          payload.error ?? (useDouglasBridge ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)." : "Scraping a eșuat.")
+          payload.error ?? (useLocalBridge ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)." : "Scraping a eșuat.")
         );
       }
 
@@ -770,7 +916,7 @@ export default function DashboardClient({
       // bridge not running — is also "instanceof Error" but with a generic
       // browser message ("Failed to fetch"), so point at the bridge instead
       // when that's the endpoint that was in play.
-      const fallback = useDouglasBridge
+      const fallback = useLocalBridge
         ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)."
         : "Eroare la scraping.";
       setAddProductUrlError(error instanceof Error && error.message !== "Failed to fetch" ? error.message : fallback);
@@ -833,6 +979,10 @@ export default function DashboardClient({
   function buildImportRow(index: number): Record<string, unknown> {
     const fields = buildFinalRow(parsedRows[index]);
     const info = scrapedInfo[index];
+
+    if (isEmptyValue(fields.Name) && scrapedNames[index]) {
+      fields.Name = scrapedNames[index];
+    }
 
     if (scrapedDescriptions[index]) {
       fields.Description = [scrapedDescriptions[index], fields.Description].filter(Boolean).join("\n\n");
@@ -956,7 +1106,7 @@ export default function DashboardClient({
               </button>
             ))}
             <a
-              href="/store"
+              href="/dpstore/store"
               className="px-4 py-3 text-left text-sm font-medium uppercase tracking-wide text-white/80 transition hover:bg-white/10 hover:text-white"
             >
               Store
@@ -1008,13 +1158,49 @@ export default function DashboardClient({
 
                 <div className="mt-6 border-t border-[#e6e3e5] pt-6">
                   <h3 className="text-sm font-semibold uppercase tracking-wide text-[#301934]">
+                    Lipește coloane din Excel
+                  </h3>
+                  <p className="mt-1 text-xs text-[#6b676b]">
+                    Copiază un interval de celule din Excel/Google Sheets și lipește-l mai jos. Dacă
+                    prima linie conține anteturi, sunt folosite ca nume de coloane; altfel coloanele
+                    sunt numite automat Col1, Col2, ... .
+                  </p>
+                  <textarea
+                    rows={6}
+                    value={pasteText}
+                    onChange={(event) => setPasteText(event.target.value)}
+                    placeholder="Lipește aici conținutul copiat din Excel"
+                    className="mt-3 w-full border border-[#d8d0c5] px-3 py-2 text-sm md:max-w-2xl"
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-2 text-xs text-[#6b676b]">
+                      <input
+                        type="checkbox"
+                        checked={pasteHasHeader}
+                        onChange={(event) => setPasteHasHeader(event.target.checked)}
+                      />
+                      Prima linie conține anteturi
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handlePasteImport}
+                      disabled={!pasteText.trim()}
+                      className="border border-[#301934] bg-[#301934] px-4 py-2 text-xs font-semibold uppercase tracking-wide text-white transition hover:bg-[#241226] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Adaugă în tabel
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-6 border-t border-[#e6e3e5] pt-6">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-[#301934]">
                     Adaugă produs după URL
                   </h3>
                   <p className="mt-1 text-xs text-[#6b676b]">
                     Lipește URL-ul paginii unui produs — numele, prețul, descrierea și imaginile se
                     extrag automat, iar produsul e adăugat ca rând nou în tabel, pregătit de import.
                     Funcționează doar pe site-uri care nu blochează accesul automat; pentru douglas.ro
-                    adaugă mai întâi rândul (Name + Product URL) și folosește butonul „Scrapează Douglas”
+                    adaugă mai întâi rândul (Name + Product URL) și folosește butonul „Scrapează produs”
                     de la rândul respectiv.
                   </p>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1187,26 +1373,27 @@ export default function DashboardClient({
                                     >
                                       {getSiteLabel(getProductUrl(row))}
                                     </button>
-                                    {isDouglasUrl(getProductUrl(row)) && (
-                                      <>
-                                        <button
-                                          type="button"
-                                          onClick={() => void handleDouglasScrape(index)}
-                                          disabled={douglasScrapeStatus[index] === "loading"}
-                                          className="inline-flex w-fit items-center rounded border border-black bg-yellow-400 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300 disabled:opacity-50"
-                                        >
-                                          {douglasScrapeStatus[index] === "loading" ? "Se scanează..." : "Scrapează Douglas"}
-                                        </button>
-                                        {(scrapedPrices[index]?.now ?? scrapedPrices[index]?.old) != null && (
-                                          <span className="text-[10px] text-[#301934]">
-                                            Preț: {scrapedPrices[index]?.now ?? "—"}
-                                            {scrapedPrices[index]?.old ? ` (PRP ${scrapedPrices[index]?.old})` : ""} RON
-                                          </span>
-                                        )}
-                                        {douglasScrapeStatus[index] && douglasScrapeStatus[index] !== "loading" && douglasScrapeStatus[index] !== "ok" && (
-                                          <span className="max-w-[9rem] text-[10px] text-[#b23b3b]">{douglasScrapeStatus[index]}</span>
-                                        )}
-                                      </>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleScrapeRow(index)}
+                                      disabled={scrapeStatus[index] === "loading"}
+                                      className="inline-flex w-fit items-center rounded border border-black bg-yellow-400 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300 disabled:opacity-50"
+                                    >
+                                      {scrapeStatus[index] === "loading" ? "Se scanează..." : "Scrapează produs"}
+                                    </button>
+                                    {scrapedNames[index] && (
+                                      <span className="max-w-[9rem] truncate text-[10px] text-[#301934]" title={scrapedNames[index]}>
+                                        Nume: {scrapedNames[index]}
+                                      </span>
+                                    )}
+                                    {(scrapedPrices[index]?.now ?? scrapedPrices[index]?.old) != null && (
+                                      <span className="text-[10px] text-[#301934]">
+                                        Preț: {scrapedPrices[index]?.now ?? "—"}
+                                        {scrapedPrices[index]?.old ? ` (PRP ${scrapedPrices[index]?.old})` : ""} RON
+                                      </span>
+                                    )}
+                                    {scrapeStatus[index] && scrapeStatus[index] !== "loading" && scrapeStatus[index] !== "ok" && (
+                                      <span className="max-w-[9rem] text-[10px] text-[#b23b3b]">{scrapeStatus[index]}</span>
                                     )}
                                   </div>
                                 ) : (
