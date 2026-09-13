@@ -203,6 +203,41 @@ function getSiteLabel(url: string): string {
 // row's gallery, built up one drag-and-drop at a time.
 type ScrapedInfo = { images: string[] };
 
+// Douglas returns a deceptive Akamai 400 to any plain fetch/curl regardless
+// of headers — only a real browser's TLS/JS fingerprint gets past the bot
+// check. douglas-scraper/server.js runs that real browser locally (next to
+// whichever machine the admin has the dashboard open on) and exposes it over
+// a small local HTTP bridge; this is just the client for it.
+const DOUGLAS_BRIDGE_URL = "http://localhost:5391";
+
+function isDouglasUrl(url: string): boolean {
+  try {
+    return /(^|\.)douglas\.ro$/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+type DouglasScrapeResult = {
+  name: string | null;
+  description: string | null;
+  priceNow: number | null;
+  priceOld: number | null;
+  images: string[];
+};
+
+// Response shape of POST /dpstore/api/scrape-product (see
+// web/lib/import-product.ts's scrapeProductPage) — a plain-fetch, no-browser
+// scrape that works for most sites but not ones with bot protection (e.g.
+// douglas.ro), unlike the Douglas-only bridge above.
+type ScrapeProductResult = {
+  name: string | null;
+  priceNow: number | null;
+  priceOld: number | null;
+  description: string | null;
+  images: string[];
+};
+
 // Mirrors the OverwriteMode in lib/import-product.ts — how a row flagged as
 // "already exists" should be re-applied onto its existing Airtable record.
 // The Sync page only ever offers a choice between "all" (default) and
@@ -287,6 +322,11 @@ export default function DashboardClient({
   const [importDuplicates, setImportDuplicates] = useState<string[]>([]);
   const [scrapedInfo, setScrapedInfo] = useState<Record<number, ScrapedInfo>>({});
   const [scrapedDescriptions, setScrapedDescriptions] = useState<Record<number, string>>({});
+  const [scrapedPrices, setScrapedPrices] = useState<Record<number, { now: number | null; old: number | null }>>({});
+  const [douglasScrapeStatus, setDouglasScrapeStatus] = useState<Record<number, string>>({});
+  const [newProductUrl, setNewProductUrl] = useState("");
+  const [isAddingProductByUrl, setIsAddingProductByUrl] = useState(false);
+  const [addProductUrlError, setAddProductUrlError] = useState<string | null>(null);
   const [emails, setEmails] = useState<MailItem[]>([]);
   const [mailStatus, setMailStatus] = useState<string | null>(null);
 
@@ -327,7 +367,64 @@ export default function DashboardClient({
     setOverwriteModes({});
     setColumnMapping({});
     setAppliedTemplateName(null);
+    setScrapedPrices({});
+    setDouglasScrapeStatus({});
     setFileName(name);
+  }
+
+  // Parses CSV text (with support for quoted fields containing commas,
+  // newlines, or escaped quotes) into the same Record<string, unknown>[]
+  // shape a JSON array of products used to produce, so applyParsedRows and
+  // recordRecentFile need no changes.
+  function parseCsvRows(text: string): Record<string, unknown>[] {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (inQuotes) {
+        if (char === '"') {
+          if (text[i + 1] === '"') {
+            field += '"';
+            i++;
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          field += char;
+        }
+        continue;
+      }
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === ",") {
+        row.push(field);
+        field = "";
+      } else if (char === "\n" || char === "\r") {
+        if (char === "\r" && text[i + 1] === "\n") i++;
+        row.push(field);
+        field = "";
+        rows.push(row);
+        row = [];
+      } else {
+        field += char;
+      }
+    }
+    if (field.length > 0 || row.length > 0) {
+      row.push(field);
+      rows.push(row);
+    }
+    const nonEmptyRows = rows.filter((cells) => cells.some((cell) => cell.trim() !== ""));
+    if (nonEmptyRows.length < 2) return [];
+    const headers = nonEmptyRows[0].map((header) => header.trim());
+    return nonEmptyRows.slice(1).map((cells) => {
+      const record: Record<string, unknown> = {};
+      headers.forEach((header, index) => {
+        if (header) record[header] = cells[index] ?? "";
+      });
+      return record;
+    });
   }
 
   // Shared by a fresh file upload and reopening one of the last 5 recent
@@ -400,13 +497,12 @@ export default function DashboardClient({
     resetImportState(file?.name ?? null);
     if (!file) return;
     try {
-      const rows = JSON.parse(await file.text());
-      if (!Array.isArray(rows) || rows.length === 0) throw new Error("JSON-ul trebuie să fie un array de produse.");
-      const typedRows = rows as Record<string, unknown>[];
+      const typedRows = parseCsvRows(await file.text());
+      if (typedRows.length === 0) throw new Error("CSV-ul trebuie să conțină cel puțin un produs.");
       applyParsedRows(typedRows);
       recordRecentFile(file.name, typedRows);
     } catch (error) {
-      setFileError(error instanceof Error ? error.message : "Fișierul nu este un JSON valid.");
+      setFileError(error instanceof Error ? error.message : "Fișierul nu este un CSV valid.");
     }
   }
 
@@ -562,6 +658,114 @@ export default function DashboardClient({
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
+  // Calls the local douglas-scraper bridge (see douglas-scraper/server.js) —
+  // a real headless Chrome running on the admin's own machine, since Douglas
+  // blocks any plain fetch. Fills the same scrapedInfo/scrapedDescriptions
+  // gallery + description state the drag-drop flow already writes to, plus
+  // the row's price, without touching whatever the JSON's own columns
+  // already mapped.
+  async function handleDouglasScrape(index: number) {
+    const url = getProductUrl(parsedRows[index]);
+    if (!url || !isDouglasUrl(url)) return;
+
+    setDouglasScrapeStatus((current) => ({ ...current, [index]: "loading" }));
+    try {
+      const response = await fetch(`${DOUGLAS_BRIDGE_URL}/scrape`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const payload = (await response.json()) as DouglasScrapeResult & { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Scraping a eșuat.");
+
+      if (payload.images?.length) {
+        setScrapedInfo((current) => {
+          const existingImages = current[index]?.images ?? [];
+          const merged = Array.from(new Set([...existingImages, ...payload.images]));
+          return { ...current, [index]: { images: merged } };
+        });
+      }
+      if (payload.description) {
+        setScrapedDescriptions((current) => ({ ...current, [index]: payload.description ?? current[index] ?? "" }));
+      }
+      if (payload.priceNow !== null || payload.priceOld !== null) {
+        setScrapedPrices((current) => ({ ...current, [index]: { now: payload.priceNow, old: payload.priceOld } }));
+      }
+      setDouglasScrapeStatus((current) => ({ ...current, [index]: "ok" }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper).";
+      setDouglasScrapeStatus((current) => ({ ...current, [index]: message }));
+    }
+  }
+
+  // Standalone "paste a URL, get a new row" flow — unlike handleDouglasScrape
+  // above (which only fills in gaps on a row a CSV/JSON import already
+  // produced), this creates the row itself from nothing but the pasted URL,
+  // via the serverless-friendly (no headless browser) /api/scrape-product
+  // route. Only works for sites that don't block plain fetch — Douglas and
+  // similar bot-gated sites need the local bridge + "Scrapează Douglas"
+  // button on an existing row instead.
+  async function handleAddProductFromUrl() {
+    const url = newProductUrl.trim();
+    if (!/^https?:\/\//i.test(url)) {
+      setAddProductUrlError("Introdu un URL valid (http/https).");
+      return;
+    }
+
+    setIsAddingProductByUrl(true);
+    setAddProductUrlError(null);
+    try {
+      const response = await fetch("/dpstore/api/scrape-product", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const payload = (await response.json()) as ScrapeProductResult & { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Scraping a eșuat.");
+
+      const name = (payload.name ?? "").trim();
+      const newRow: Record<string, unknown> = { Name: name, "Product URL": url };
+      const nextIndex = parsedRows.length;
+      const nameKey = name.toLowerCase();
+      const isExisting = Boolean((nameKey && existingNames.has(nameKey)) || existingUrls.has(url));
+
+      // "Name" and "Product URL" are columns this flow creates itself (not
+      // an arbitrary CSV header), so mapping each straight to its
+      // same-named field isn't a guess the way auto-mapping an unknown
+      // column would be — it's just wiring the row up to import correctly.
+      // Only set when unmapped so a pre-existing CSV's own choice for these
+      // columns (if any) is never overridden.
+      setColumnMapping((current) => ({
+        ...current,
+        Name: current.Name ?? "Name",
+        "Product URL": current["Product URL"] ?? "Product URL",
+      }));
+      setParsedRows((current) => [...current, newRow]);
+      setRowCategories((current) => [...current, guessCategoryForName(name, categories)]);
+      setIncludedRows((current) => [...current, !isExisting]);
+      setIsExistingRow((current) => [...current, isExisting]);
+      if (!fileName) setFileName("Produse adăugate manual");
+
+      if (payload.description) {
+        setScrapedDescriptions((current) => ({ ...current, [nextIndex]: payload.description as string }));
+      }
+      if (payload.images?.length) {
+        setScrapedInfo((current) => ({ ...current, [nextIndex]: { images: payload.images } }));
+      }
+      if (payload.priceNow !== null || payload.priceOld !== null) {
+        setScrapedPrices((current) => ({
+          ...current,
+          [nextIndex]: { now: payload.priceNow ?? null, old: payload.priceOld ?? null },
+        }));
+      }
+      setNewProductUrl("");
+    } catch (error) {
+      setAddProductUrlError(error instanceof Error ? error.message : "Eroare la scraping.");
+    } finally {
+      setIsAddingProductByUrl(false);
+    }
+  }
+
   // Drop target for "drag an image from the opened product tab" — reads
   // whatever URL form the browser gave the drop (uri-list, falling back to
   // plain text) and appends it to the row's gallery. Feeds the same
@@ -632,6 +836,12 @@ export default function DashboardClient({
       fields["Image URL"] = fields["Image URL"] ?? info.images[0];
       fields["Product Images"] = info.images.join(", ");
     }
+
+    // Scraped price only fills in what the mapped columns left blank — a
+    // column the admin explicitly mapped to Price/Old Price still wins.
+    const prices = scrapedPrices[index];
+    if (prices?.now !== null && prices?.now !== undefined) fields.Price = fields.Price ?? prices.now;
+    if (prices?.old !== null && prices?.old !== undefined) fields["Old Price"] = fields["Old Price"] ?? prices.old;
 
     fields.Category = rowCategories[index];
     if (isExistingRow[index]) {
@@ -748,17 +958,17 @@ export default function DashboardClient({
           {section === "sync" && (
             <div className="mt-10 grid min-w-0 gap-6">
               <div className="min-w-0 border border-[#e6e3e5] bg-white p-6">
-                <h2 className="text-xl font-medium text-[#301934]">Import produse din JSON</h2>
+                <h2 className="text-xl font-medium text-[#301934]">Import produse din CSV</h2>
                 <p className="mt-2 text-sm text-[#6b676b]">
-                  Încarcă un fișier JSON (array de produse). Pentru fiecare coloană, alege sub numele ei
-                  câmpul din Products căruia îi corespunde — coloanele lăsate pe &quot;— la Descriere —&quot;
-                  (sau mapate la un câmp ales de mai multe coloane) se adaugă la Description, iar cele
-                  puse pe &quot;— Ignoră —&quot; nu se importă deloc. Bifează produsele de importat și
-                  alege categoria fiecăruia.
+                  Încarcă un fișier CSV (prima linie = antet, restul = produse). Pentru fiecare coloană,
+                  alege sub numele ei câmpul din Products căruia îi corespunde — coloanele lăsate pe
+                  &quot;— la Descriere —&quot; (sau mapate la un câmp ales de mai multe coloane) se adaugă
+                  la Description, iar cele puse pe &quot;— Ignoră —&quot; nu se importă deloc. Bifează
+                  produsele de importat și alege categoria fiecăruia.
                 </p>
                 <input
                   type="file"
-                  accept="application/json,.json"
+                  accept="text/csv,.csv"
                   onChange={(event) => void handleFileChange(event)}
                   className="mt-5 block w-full text-sm md:max-w-md"
                 />
@@ -782,6 +992,42 @@ export default function DashboardClient({
                 {appliedTemplateName && (
                   <p className="mt-3 text-sm text-[#9a783f]">Șablon aplicat automat: „{appliedTemplateName}”.</p>
                 )}
+
+                <div className="mt-6 border-t border-[#e6e3e5] pt-6">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-[#301934]">
+                    Adaugă produs după URL
+                  </h3>
+                  <p className="mt-1 text-xs text-[#6b676b]">
+                    Lipește URL-ul paginii unui produs — numele, prețul, descrierea și imaginile se
+                    extrag automat, iar produsul e adăugat ca rând nou în tabel, pregătit de import.
+                    Funcționează doar pe site-uri care nu blochează accesul automat; pentru douglas.ro
+                    adaugă mai întâi rândul (Name + Product URL) și folosește butonul „Scrapează Douglas”
+                    de la rândul respectiv.
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <input
+                      type="url"
+                      value={newProductUrl}
+                      onChange={(event) => setNewProductUrl(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        void handleAddProductFromUrl();
+                      }}
+                      placeholder="https://exemplu.ro/produs/..."
+                      className="w-full max-w-md border border-[#d8d0c5] px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleAddProductFromUrl()}
+                      disabled={isAddingProductByUrl || !newProductUrl.trim()}
+                      className="inline-flex items-center rounded border border-black bg-yellow-400 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300 disabled:opacity-50"
+                    >
+                      {isAddingProductByUrl ? "Se scanează..." : "Scrapează și adaugă"}
+                    </button>
+                  </div>
+                  {addProductUrlError && <p className="mt-2 text-xs text-[#b23b3b]">{addProductUrlError}</p>}
+                </div>
 
                 {parsedRows.length > 0 && (
                   <>
@@ -920,13 +1166,36 @@ export default function DashboardClient({
                               })}
                               <td className="whitespace-nowrap px-3 py-2 align-top">
                                 {getProductUrl(row) ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => openProductPage(getProductUrl(row))}
-                                    className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
-                                  >
-                                    {getSiteLabel(getProductUrl(row))}
-                                  </button>
+                                  <div className="grid gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => openProductPage(getProductUrl(row))}
+                                      className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
+                                    >
+                                      {getSiteLabel(getProductUrl(row))}
+                                    </button>
+                                    {isDouglasUrl(getProductUrl(row)) && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleDouglasScrape(index)}
+                                          disabled={douglasScrapeStatus[index] === "loading"}
+                                          className="inline-flex w-fit items-center rounded border border-black bg-yellow-400 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300 disabled:opacity-50"
+                                        >
+                                          {douglasScrapeStatus[index] === "loading" ? "Se scanează..." : "Scrapează Douglas"}
+                                        </button>
+                                        {(scrapedPrices[index]?.now ?? scrapedPrices[index]?.old) != null && (
+                                          <span className="text-[10px] text-[#301934]">
+                                            Preț: {scrapedPrices[index]?.now ?? "—"}
+                                            {scrapedPrices[index]?.old ? ` (PRP ${scrapedPrices[index]?.old})` : ""} RON
+                                          </span>
+                                        )}
+                                        {douglasScrapeStatus[index] && douglasScrapeStatus[index] !== "loading" && douglasScrapeStatus[index] !== "ok" && (
+                                          <span className="max-w-[9rem] text-[10px] text-[#b23b3b]">{douglasScrapeStatus[index]}</span>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
                                 ) : (
                                   <span className="text-[#6b676b]">—</span>
                                 )}

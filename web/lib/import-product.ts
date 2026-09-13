@@ -178,21 +178,53 @@ export async function scrapeProductInformation(productUrl: string): Promise<stri
   return html ? extractProductInformationSection(html) : null;
 }
 
-// Best-effort scrape of a product's own page — price, a human-readable
-// price blurb (prepended to Description), and gallery images. Used both to
-// fill in whatever the uploaded JSON's own columns didn't carry, and so the
-// Sync page can tell upfront which fields still need a human to fill in.
-// Returns all-empty fields (never throws) when nothing is found or the page
-// can't be fetched, so callers can treat that as "ask the user".
+// Best-effort product name, in the same priority order most PDPs actually
+// carry it: schema.org Product JSON-LD (most reliable, when present), then
+// og:title (usually just the product name, no site suffix), then the page's
+// own <h1>, then <title> as a last resort (often "Name — Site" and noisiest,
+// hence last). Never throws; a page with none of these just yields null.
+function extractProductName(html: string): string | null {
+  for (const match of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const data = JSON.parse(match[1]);
+      for (const item of Array.isArray(data) ? data : [data]) {
+        if (item?.["@type"] === "Product" && typeof item?.name === "string" && item.name.trim()) {
+          return item.name.trim();
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["'][^>]*>/i);
+  if (ogTitle?.[1]?.trim()) return ogTitle[1].trim();
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const h1Text = h1 ? stripHtmlToText(h1[1]).trim() : "";
+  if (h1Text) return h1Text;
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const titleText = title ? stripHtmlToText(title[1]).trim() : "";
+  return titleText || null;
+}
+
+// Best-effort scrape of a product's own page — name, price, a
+// human-readable price blurb (prepended to Description), and gallery
+// images. Used both to fill in whatever the uploaded JSON's own columns
+// didn't carry, and so the Sync page's "Adaugă produs după URL" box can
+// build a whole new row from just a pasted URL. Returns all-empty fields
+// (never throws) when nothing is found or the page can't be fetched, so
+// callers can treat that as "ask the user". Plain fetch only — sites that
+// block bots (e.g. Douglas's Akamai check) get nothing back here and need
+// the douglas-scraper bridge's real-browser flow instead.
 export async function scrapeProductPage(
   productUrl: string
-): Promise<{ priceNow: number | null; priceOld: number | null; description: string | null; images: string[] }> {
+): Promise<{ name: string | null; priceNow: number | null; priceOld: number | null; description: string | null; images: string[] }> {
   const html = await fetchHtml(productUrl);
-  if (!html) return { priceNow: null, priceOld: null, description: null, images: [] };
+  if (!html) return { name: null, priceNow: null, priceOld: null, description: null, images: [] };
   const jsonLd = extractJsonLdOffer(html);
   const description = jsonLd.description ?? extractPriceDescriptionFromHtml(html) ?? extractMetaDescription(html);
   const images = await scrapeProductGallery(productUrl);
-  return { priceNow: jsonLd.priceNow, priceOld: jsonLd.priceOld, description, images };
+  const name = extractProductName(html);
+  return { name, priceNow: jsonLd.priceNow, priceOld: jsonLd.priceOld, description, images };
 }
 
 function required(name: string) {
