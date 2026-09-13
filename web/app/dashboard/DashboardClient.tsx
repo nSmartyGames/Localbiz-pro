@@ -700,11 +700,11 @@ export default function DashboardClient({
 
   // Standalone "paste a URL, get a new row" flow — unlike handleDouglasScrape
   // above (which only fills in gaps on a row a CSV/JSON import already
-  // produced), this creates the row itself from nothing but the pasted URL,
-  // via the serverless-friendly (no headless browser) /api/scrape-product
-  // route. Only works for sites that don't block plain fetch — Douglas and
-  // similar bot-gated sites need the local bridge + "Scrapează Douglas"
-  // button on an existing row instead.
+  // produced), this creates the row itself from nothing but the pasted URL.
+  // For a Douglas URL this goes through the same local bridge as
+  // handleDouglasScrape (plain fetch gets an Akamai block page there, which
+  // has no product name/price/JSON-LD to read) — everything else uses the
+  // serverless-friendly (no headless browser) /api/scrape-product route.
   async function handleAddProductFromUrl() {
     const url = newProductUrl.trim();
     if (!/^https?:\/\//i.test(url)) {
@@ -714,14 +714,19 @@ export default function DashboardClient({
 
     setIsAddingProductByUrl(true);
     setAddProductUrlError(null);
+    const useDouglasBridge = isDouglasUrl(url);
     try {
-      const response = await fetch("/dpstore/api/scrape-product", {
+      const response = await fetch(useDouglasBridge ? `${DOUGLAS_BRIDGE_URL}/scrape` : "/dpstore/api/scrape-product", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
-      const payload = (await response.json()) as ScrapeProductResult & { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "Scraping a eșuat.");
+      const payload = (await response.json()) as (ScrapeProductResult | DouglasScrapeResult) & { error?: string };
+      if (!response.ok) {
+        throw new Error(
+          payload.error ?? (useDouglasBridge ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)." : "Scraping a eșuat.")
+        );
+      }
 
       const name = (payload.name ?? "").trim();
       const newRow: Record<string, unknown> = { Name: name, "Product URL": url };
@@ -760,7 +765,15 @@ export default function DashboardClient({
       }
       setNewProductUrl("");
     } catch (error) {
-      setAddProductUrlError(error instanceof Error ? error.message : "Eroare la scraping.");
+      // A thrown Error above (bad response, admin check, etc.) already
+      // carries a useful message. A bare fetch() rejection — e.g. the local
+      // bridge not running — is also "instanceof Error" but with a generic
+      // browser message ("Failed to fetch"), so point at the bridge instead
+      // when that's the endpoint that was in play.
+      const fallback = useDouglasBridge
+        ? "Bridge-ul local nu răspunde (rulează `npm run bridge` în douglas-scraper)."
+        : "Eroare la scraping.";
+      setAddProductUrlError(error instanceof Error && error.message !== "Failed to fetch" ? error.message : fallback);
     } finally {
       setIsAddingProductByUrl(false);
     }
