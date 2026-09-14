@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -20,7 +20,7 @@ function initials(name: string): string {
 
 // Splits a product's Description into the unmatched-JSON-column lines the
 // Sync import folds in as "Column: value" (shown first in the details
-// drawer) and the actual description/price-blurb text (shown after).
+// section) and the actual description/price-blurb text (shown after).
 function splitDescriptionSections(description: string): { extra: string; main: string } {
   const lines = description
     .split(/\r?\n/)
@@ -52,20 +52,62 @@ export default function ProductPage({
   const product = getProduct(id);
   const [qty, setQty] = useState(1);
   const [added, setAdded] = useState(false);
-  const [isDescriptionOpen, setIsDescriptionOpen] = useState(false);
 
-  const gallery = product?.imageUrl
-    ? [product.imageUrl, ...(product.images ?? [])]
-    : [];
   const [activeImage, setActiveImage] = useState(0);
+  const [filledGaps, setFilledGaps] = useState<{
+    imageUrl: string | null;
+    images: string[];
+    priceNow: number | null;
+    priceOld: number | null;
+  } | null>(null);
+
+  // A product row can carry a real "Product URL" but still be missing the
+  // image or price the Sync import didn't manage to scrape. Re-run that same
+  // scrape once per page visit, on demand, so the gap self-heals in Airtable
+  // (and on screen) without a manual re-sync.
+  useEffect(() => {
+    if (!product?.productUrl) return;
+    const missingImage = product.imageUrl === null || /^https:\/\/picsum\.photos\//i.test(product.imageUrl);
+    const missingPrice = product.priceNow === null;
+    if (!missingImage && !missingPrice) return;
+
+    let cancelled = false;
+    fetch("/api/store/fill-product-gaps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId: product.id }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && data?.updated) setFilledGaps(data.updated);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [product?.id, product?.productUrl, product?.imageUrl, product?.priceNow]);
 
   if (!product) {
     notFound();
   }
 
-  const category = categories.find((c) => c.slug === product.category);
-  const inStock = product.priceNow !== null;
-  const { extra: extraInfo, main: mainDescription } = splitDescriptionSections(product.description);
+  const displayProduct = filledGaps
+    ? {
+        ...product,
+        imageUrl: filledGaps.imageUrl ?? product.imageUrl,
+        images: filledGaps.images.length > 0 ? filledGaps.images : product.images,
+        priceNow: filledGaps.priceNow ?? product.priceNow,
+        priceOld: filledGaps.priceOld ?? product.priceOld,
+      }
+    : product;
+
+  const gallery = displayProduct.imageUrl
+    ? [displayProduct.imageUrl, ...(displayProduct.images ?? []).filter((src) => src !== displayProduct.imageUrl)]
+    : [];
+
+  const category = categories.find((c) => c.slug === displayProduct.category);
+  const inStock = displayProduct.priceNow !== null;
+  const { extra: extraInfo, main: mainDescription } = splitDescriptionSections(displayProduct.description);
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-12 text-[#242124]">
@@ -84,7 +126,7 @@ export default function ProductPage({
             {gallery.length > 0 ? (
               <Image
                 src={gallery[activeImage]}
-                alt={product.name}
+                alt={displayProduct.name}
                 width={420}
                 height={420}
                 priority
@@ -92,10 +134,10 @@ export default function ProductPage({
               />
             ) : (
               <div className="flex h-56 w-56 items-center justify-center rounded-full bg-[#4B2354] text-4xl font-semibold tracking-wide text-white">
-                {initials(product.name)}
+                {initials(displayProduct.name)}
               </div>
             )}
-            {!product.isReal && (
+            {!displayProduct.isReal && (
               <span className="absolute right-4 top-4 rounded-full border border-[#e4ddd0] bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#6b6b66]">
                 Demo
               </span>
@@ -134,22 +176,15 @@ export default function ProductPage({
             </div>
           )}
           <h1 className="mb-2 text-3xl font-medium leading-tight text-[#242124] md:text-4xl">
-            {product.name}
+            {displayProduct.name}
           </h1>
-          <div className="mb-5 text-base text-[#6b676b]">{product.size}</div>
-          <button
-            type="button"
-            onClick={() => setIsDescriptionOpen(true)}
-            className="mb-6 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-[#301934] underline underline-offset-4 hover:text-[#4B2354]"
-          >
-            Detalii produs / Descriere
-          </button>
+          <div className="mb-5 text-base text-[#6b676b]">{displayProduct.size}</div>
           <div className="mb-6">
             <PriceTag
-              priceNow={product.priceNow}
-              priceOld={product.priceOld}
-              pricePerMl={product.pricePerMl}
-              currency={product.currency}
+              priceNow={displayProduct.priceNow}
+              priceOld={displayProduct.priceOld}
+              pricePerMl={displayProduct.pricePerMl}
+              currency={displayProduct.currency}
               light
             />
           </div>
@@ -194,33 +229,11 @@ export default function ProductPage({
               Notifică-mă la stoc
             </button>
           )}
-        </div>
-      </div>
 
-      {isDescriptionOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setIsDescriptionOpen(false)}
-            aria-hidden="true"
-          />
-          <div className="relative flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-[#b08d57]/30 bg-[#fdfcfb] p-8 shadow-2xl">
-            <div className="mb-6 flex items-start justify-between border-b border-[#e6e3e5] pb-5">
-              <div>
-                <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b08d57]">
-                  Produs
-                </div>
-                <h2 className="text-xl font-medium tracking-wide text-[#242124]">Detalii produs</h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsDescriptionOpen(false)}
-                className="-translate-x-[30px] rounded-full p-2 text-4xl leading-none text-[#6b676b] transition-colors hover:bg-[#f8f7f6] hover:text-[#301934]"
-                aria-label="Închide"
-              >
-                &times;
-              </button>
-            </div>
+          <div className="mt-8 border-t border-[#e6e3e5] pt-6">
+            <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-[#b08d57]">
+              Detalii produs
+            </h2>
             {extraInfo && (
               <div className="mb-5 whitespace-pre-line border-b border-[#e6e3e5] pb-5 text-sm leading-relaxed text-[#6b676b]">
                 {extraInfo}
@@ -231,7 +244,7 @@ export default function ProductPage({
             </div>
           </div>
         </div>
-      )}
+      </div>
     </main>
   );
 }

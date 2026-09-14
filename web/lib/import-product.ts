@@ -234,7 +234,7 @@ function required(name: string) {
   return value;
 }
 
-async function uploadImage(imageUrl: string, productId: string, index = 0) {
+export async function uploadImage(imageUrl: string, productId: string, index = 0) {
   const bucket = required("GOOGLE_CLOUD_STORAGE_BUCKET");
   const storage = new Storage({
     projectId: process.env.GOOGLE_CLOUD_PROJECT ?? "g-hub-393209",
@@ -446,4 +446,73 @@ export async function importProductRow(
   }
 
   return { name, category, airtableId: payload.id, imageUrl: uploadedImages[0] ?? null, overwritten: Boolean(existingId) };
+}
+
+// Patches whatever a Products row is genuinely missing (no real image, no
+// price) by re-scraping the row's own "Product URL" — the same source used
+// at import time, but re-run on demand from the storefront product page so
+// gaps left by a partial import get filled in without a manual Sync pass.
+// Looks the record up itself by productId (rather than trusting a
+// client-supplied URL) so a caller can't point this at an arbitrary URL and
+// have it written into someone else's record. Old Price is only ever filled
+// as a side effect of a genuinely missing Price/image — never triggered on
+// its own, since null there is usually just "no discount", not "empty".
+export async function fillMissingProductFields(productId: string): Promise<{
+  imageUrl: string | null;
+  images: string[];
+  priceNow: number | null;
+  priceOld: number | null;
+} | null> {
+  const { getAllStoreProductRecords } = await import("@/lib/airtable-products");
+  const records = await getAllStoreProductRecords();
+  const record = records.find((entry) => entry.product.id === productId);
+  const productUrl = record?.product.productUrl;
+  if (!record || !productUrl) return null;
+
+  const { product, airtableRecordId } = record;
+  const needsImage = product.imageUrl === null || /^https:\/\/picsum\.photos\//i.test(product.imageUrl);
+  const needsPrice = product.priceNow === null;
+  if (!needsImage && !needsPrice) return null;
+
+  const scraped = await scrapeProductPage(productUrl);
+
+  const fields: Record<string, unknown> = {};
+  let imageUrl = product.imageUrl;
+  let images = product.images ?? [];
+  if (needsImage && scraped.images.length > 0) {
+    const uploaded = await Promise.all(
+      scraped.images.slice(0, 8).map((url, index) => uploadImage(url, productId, index))
+    );
+    imageUrl = uploaded[0] ?? imageUrl;
+    images = uploaded;
+    fields["Image URL"] = uploaded[0] ?? "";
+    fields["Product Images"] = uploaded.join(", ");
+  }
+
+  let priceNow = product.priceNow;
+  let priceOld = product.priceOld;
+  if (needsPrice && scraped.priceNow !== null) {
+    priceNow = scraped.priceNow;
+    fields.Price = scraped.priceNow;
+    if (scraped.priceOld !== null && scraped.priceOld > scraped.priceNow) {
+      priceOld = scraped.priceOld;
+      fields["Old Price"] = scraped.priceOld;
+    }
+  }
+
+  if (Object.keys(fields).length === 0) return null;
+
+  const baseId = required("AIRTABLE_BASE_ID");
+  const table = encodeURIComponent(process.env.AIRTABLE_PRODUCTS_TABLE ?? "Products");
+  const response = await fetch(`https://api.airtable.com/v0/${baseId}/${table}/${airtableRecordId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${required("AIRTABLE_API_KEY")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields }),
+  });
+  if (!response.ok) return null;
+
+  return { imageUrl, images, priceNow, priceOld };
 }
