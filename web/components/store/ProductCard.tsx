@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import type { Product } from "@/lib/products";
@@ -38,6 +39,8 @@ function displayDescription(description: string): string {
 export function ProductCard({ product }: { product: Product }) {
   const { addItem } = useCart();
   const inStock = product.priceNow !== null;
+  const [qty, setQty] = useState(1);
+  const [added, setAdded] = useState(false);
 
   return (
     <div className="store-product-card group flex h-full flex-col overflow-hidden">
@@ -79,19 +82,47 @@ export function ProductCard({ product }: { product: Product }) {
           </div>
         </div>
       </Link>
-      <div>
-        <button
-          type="button"
-          disabled={!inStock}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (inStock) addItem(product.id);
-          }}
-          className="store-add-button w-full border-0 bg-transparent px-4 text-xs font-semibold uppercase tracking-wide transition-colors disabled:cursor-not-allowed disabled:text-[#6b6b66] disabled:hover:bg-transparent"
-        >
-          {inStock ? "Adaugă în coș" : "Notifică-mă la stoc"}
-        </button>
+      <div className="flex flex-col gap-2 p-4 pt-0">
+        {inStock ? (
+          <div className="flex items-center gap-2">
+            <select
+              value={qty}
+              onChange={(e) => setQty(Number(e.target.value))}
+              className="rounded-sm border border-[#e6e3e5] bg-white px-2 py-2 text-xs text-[#242124] focus:border-[#301934] focus:outline-none"
+              aria-label="Cantitate"
+            >
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n} buc
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                addItem(product.id, qty);
+                setAdded(true);
+                window.setTimeout(() => setAdded(false), 2000);
+              }}
+              className="store-add-button flex-1 border-0 bg-transparent px-4 text-xs font-semibold uppercase tracking-wide transition-colors"
+            >
+              Adaugă în coș
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled
+            className="store-add-button w-full border-0 bg-transparent px-4 text-xs font-semibold uppercase tracking-wide transition-colors disabled:cursor-not-allowed disabled:text-[#6b6b66] disabled:hover:bg-transparent"
+          >
+            Notifică-mă la stoc
+          </button>
+        )}
+        {added && (
+          <span className="text-center text-xs font-medium text-[#4B2354]">
+            Adăugat în coș.
+          </span>
+        )}
       </div>
     </div>
   );

@@ -3,43 +3,26 @@ import Link from "next/link";
 export function StoreFooter() {
   return (
     <footer className="border-t border-[#e6e3e5] bg-[#301934] text-white">
-      <div className="mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-10 sm:grid-cols-3">
-        <div>
-          <h2 className="text-xs font-bold uppercase tracking-[0.16em] text-[#d4b477]">
-            Locație
-          </h2>
-          <address className="mt-3 not-italic text-sm leading-relaxed text-white/80">
-            Cluj
-            <br />
-            Strada Callatis
-          </address>
-        </div>
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-8 gap-y-3 px-6 py-6 text-center text-sm">
+        <span className="text-white/80">
+          <span className="font-bold uppercase tracking-[0.16em] text-[#d4b477]">Locație:</span>{" "}
+          Cluj, Strada Callatis
+        </span>
 
-        <div>
-          <h2 className="text-xs font-bold uppercase tracking-[0.16em] text-[#d4b477]">
-            Contact
-          </h2>
-          <a
-            href="tel:0771047048"
-            className="mt-3 inline-block text-sm text-white/80 hover:text-white"
-          >
-            0771 047 048
-          </a>
-        </div>
+        <a href="tel:0771047048" className="text-white/80 hover:text-white">
+          <span className="font-bold uppercase tracking-[0.16em] text-[#d4b477]">Contact:</span>{" "}
+          0771 047 048
+        </a>
 
-        <div>
-          <h2 className="text-xs font-bold uppercase tracking-[0.16em] text-[#d4b477]">
-            Sponsori
-          </h2>
-          <Link
-            href="https://claude.ai"
-            target="_blank"
-            rel="noreferrer"
-            className="mt-3 inline-block text-sm text-white/80 hover:text-white"
-          >
-            Claude AI
-          </Link>
-        </div>
+        <Link
+          href="https://claude.ai"
+          target="_blank"
+          rel="noreferrer"
+          className="text-white/80 hover:text-white"
+        >
+          <span className="font-bold uppercase tracking-[0.16em] text-[#d4b477]">Sponsori:</span>{" "}
+          Claude AI
+        </Link>
       </div>
     </footer>
   );

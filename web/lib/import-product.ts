@@ -59,6 +59,10 @@ async function scrapeProductGallery(productUrl: string): Promise<string[]> {
     return Array.from(new Set([...primary, ...scoped]))
       .map((url) => (url.startsWith("//") ? `https:${url}` : url))
       .filter((url) => /^https?:\/\//i.test(url))
+      // A PDP template defaulting og:image/JSON-LD "image" to its own
+      // canonical URL when no real photo is set would otherwise import the
+      // product page link itself as if it were a photo.
+      .filter((url) => url !== productUrl)
       .slice(0, 8);
   } catch {
     return [];

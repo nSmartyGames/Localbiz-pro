@@ -210,7 +210,7 @@ type ScrapedInfo = { images: string[] };
 // admin has the dashboard open on) and exposes it over a small local HTTP
 // bridge; this is just the client for it.
 const LOCAL_BRIDGE_URL = "http://localhost:5391";
-const LOCAL_BRIDGE_HOSTS = /(^|\.)(douglas\.ro|notino\.ro)$/i;
+const LOCAL_BRIDGE_HOSTS = /(^|\.)(douglas\.ro|notino\.ro|olx\.ro)$/i;
 
 function needsLocalBridge(url: string): boolean {
   try {
@@ -220,11 +220,20 @@ function needsLocalBridge(url: string): boolean {
   }
 }
 
+// Defense in depth against a scraper (server-side bridge or the plain-fetch
+// route) returning the product page's own URL as an "image" — e.g. a PDP
+// template defaulting og:image/JSON-LD image to the canonical URL when no
+// real photo is set for that SKU. Never show/import that as a photo.
+function dropSelfReferentialImages(images: string[], sourceUrl: string): string[] {
+  return images.filter((src) => src !== sourceUrl);
+}
+
 type DouglasScrapeResult = {
   name: string | null;
   description: string | null;
   priceNow: number | null;
   priceOld: number | null;
+  size: string | null;
   images: string[];
 };
 
@@ -237,6 +246,7 @@ type ScrapeProductResult = {
   priceNow: number | null;
   priceOld: number | null;
   description: string | null;
+  size?: string | null;
   images: string[];
 };
 
@@ -317,9 +327,9 @@ export default function DashboardClient({
   const [isExistingRow, setIsExistingRow] = useState<boolean[]>([]);
   const [overwriteModes, setOverwriteModes] = useState<Record<number, OverwriteMode>>({});
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
-  const [templates, setTemplates] = useState<ColumnTemplate[]>(() => loadTemplates());
+  const [templates, setTemplates] = useState<ColumnTemplate[]>([]);
   const [appliedTemplateName, setAppliedTemplateName] = useState<string | null>(null);
-  const [recentFiles, setRecentFiles] = useState<RecentFile[]>(() => loadRecentFiles());
+  const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
@@ -327,8 +337,14 @@ export default function DashboardClient({
   const [scrapedInfo, setScrapedInfo] = useState<Record<number, ScrapedInfo>>({});
   const [scrapedDescriptions, setScrapedDescriptions] = useState<Record<number, string>>({});
   const [scrapedPrices, setScrapedPrices] = useState<Record<number, { now: number | null; old: number | null }>>({});
+  const [scrapedSizes, setScrapedSizes] = useState<Record<number, string>>({});
   const [scrapedNames, setScrapedNames] = useState<Record<number, string>>({});
   const [scrapeStatus, setScrapeStatus] = useState<Record<number, string>>({});
+  // null = the "Salvează șablon" input isn't open; a string = the draft name
+  // typed into it. window.prompt() isn't available in every host (some
+  // embedded/automated browsers reject it outright), so this button opens an
+  // inline input instead of calling window.prompt().
+  const [templateNameDraft, setTemplateNameDraft] = useState<string | null>(null);
   const [newProductUrl, setNewProductUrl] = useState("");
   const [isAddingProductByUrl, setIsAddingProductByUrl] = useState(false);
   const [addProductUrlError, setAddProductUrlError] = useState<string | null>(null);
@@ -338,6 +354,16 @@ export default function DashboardClient({
   const columns = Array.from(new Set(parsedRows.flatMap((row) => Object.keys(row)))).filter(
     (key) => key.trim().toLowerCase() !== "category"
   );
+
+  // Loaded after mount, not as the useState initializer above — the
+  // initializer runs during SSR too (window undefined -> []), and running it
+  // again during the client's hydration render with real localStorage data
+  // produced a markup mismatch (recentFiles.length > 0 renders a block server
+  // never emitted), tripping React's hydration-failed warning.
+  useEffect(() => {
+    setTemplates(loadTemplates());
+    setRecentFiles(loadRecentFiles());
+  }, []);
 
   useEffect(() => {
     if (section !== "sync") return;
@@ -656,13 +682,18 @@ export default function DashboardClient({
     setColumnMapping((current) => applyProductUrlAliasMapping(columns, current));
   }
 
+  function openSaveTemplateDialog() {
+    const suggestedName = fileName?.replace(/\.json$/i, "") ?? "";
+    setTemplateNameDraft(appliedTemplateName ?? suggestedName);
+  }
+
   // Saves only the column -> field mapping (never the uploaded rows), keyed
   // by normalized column name, so it also matches the same export with
   // minor header casing/spacing differences next time.
-  function handleSaveTemplate() {
-    const suggestedName = fileName?.replace(/\.json$/i, "") ?? "";
-    const name = window.prompt("Nume șablon:", appliedTemplateName ?? suggestedName)?.trim();
+  function handleSaveTemplate(rawName: string) {
+    const name = rawName.trim();
     if (!name) return;
+    setTemplateNameDraft(null);
 
     const mapping: Record<string, string> = {};
     for (const column of columns) {
@@ -821,10 +852,11 @@ export default function DashboardClient({
       if (payload.name?.trim()) {
         setScrapedNames((current) => ({ ...current, [index]: payload.name!.trim() }));
       }
-      if (payload.images?.length) {
+      const cleanImages = dropSelfReferentialImages(payload.images ?? [], url);
+      if (cleanImages.length) {
         setScrapedInfo((current) => {
           const existingImages = current[index]?.images ?? [];
-          const merged = Array.from(new Set([...existingImages, ...payload.images]));
+          const merged = Array.from(new Set([...existingImages, ...cleanImages]));
           return { ...current, [index]: { images: merged } };
         });
       }
@@ -833,6 +865,9 @@ export default function DashboardClient({
       }
       if (payload.priceNow !== null || payload.priceOld !== null) {
         setScrapedPrices((current) => ({ ...current, [index]: { now: payload.priceNow, old: payload.priceOld } }));
+      }
+      if (payload.size) {
+        setScrapedSizes((current) => ({ ...current, [index]: payload.size as string }));
       }
       setScrapeStatus((current) => ({ ...current, [index]: "ok" }));
     } catch (error) {
@@ -900,14 +935,18 @@ export default function DashboardClient({
       if (payload.description) {
         setScrapedDescriptions((current) => ({ ...current, [nextIndex]: payload.description as string }));
       }
-      if (payload.images?.length) {
-        setScrapedInfo((current) => ({ ...current, [nextIndex]: { images: payload.images } }));
+      const cleanImages = dropSelfReferentialImages(payload.images ?? [], url);
+      if (cleanImages.length) {
+        setScrapedInfo((current) => ({ ...current, [nextIndex]: { images: cleanImages } }));
       }
       if (payload.priceNow !== null || payload.priceOld !== null) {
         setScrapedPrices((current) => ({
           ...current,
           [nextIndex]: { now: payload.priceNow ?? null, old: payload.priceOld ?? null },
         }));
+      }
+      if (payload.size) {
+        setScrapedSizes((current) => ({ ...current, [nextIndex]: payload.size as string }));
       }
       setNewProductUrl("");
     } catch (error) {
@@ -995,9 +1034,13 @@ export default function DashboardClient({
       // for "Image URL", even a single-image one, so the multi-image gallery
       // never reached Airtable. The import route re-fetches each URL to
       // re-host it, but this way the thumbnails shown in the table are
-      // exactly what gets imported.
-      fields["Image URL"] = fields["Image URL"] ?? info.images[0];
-      fields["Product Images"] = info.images.join(", ");
+      // exactly what gets imported. "Image URL" is the featured image and is
+      // never duplicated into "Product Images" — the gallery only carries
+      // the extra shots.
+      const featuredImage = isEmptyValue(fields["Image URL"]) ? info.images[0] : fields["Image URL"];
+      fields["Image URL"] = featuredImage;
+      const galleryImages = info.images.filter((src) => src !== featuredImage);
+      fields["Product Images"] = galleryImages.join(", ");
     }
 
     // Scraped price only fills in what the mapped columns left blank — a
@@ -1005,6 +1048,7 @@ export default function DashboardClient({
     const prices = scrapedPrices[index];
     if (prices?.now !== null && prices?.now !== undefined) fields.Price = fields.Price ?? prices.now;
     if (prices?.old !== null && prices?.old !== undefined) fields["Old Price"] = fields["Old Price"] ?? prices.old;
+    if (scrapedSizes[index]) fields.Size = fields.Size ?? scrapedSizes[index];
 
     fields.Category = rowCategories[index];
     if (isExistingRow[index]) {
@@ -1230,13 +1274,48 @@ export default function DashboardClient({
 
                 {parsedRows.length > 0 && (
                   <>
-                    <button
-                      type="button"
-                      onClick={handleSaveTemplate}
-                      className="mt-4 inline-flex items-center rounded border border-[#d8d0c5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
-                    >
-                      Salvează șablon (mapare coloane)
-                    </button>
+                    {templateNameDraft === null ? (
+                      <button
+                        type="button"
+                        onClick={openSaveTemplateDialog}
+                        className="mt-4 inline-flex items-center rounded border border-[#d8d0c5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
+                      >
+                        Salvează șablon (mapare coloane)
+                      </button>
+                    ) : (
+                      <span className="mt-4 inline-flex items-center gap-2">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={templateNameDraft}
+                          onChange={(event) => setTemplateNameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              handleSaveTemplate(templateNameDraft);
+                            } else if (event.key === "Escape") {
+                              setTemplateNameDraft(null);
+                            }
+                          }}
+                          placeholder="Nume șablon"
+                          className="border border-[#d8d0c5] px-3 py-2 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveTemplate(templateNameDraft)}
+                          className="inline-flex items-center rounded border border-black bg-yellow-400 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-yellow-300"
+                        >
+                          Salvează
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTemplateNameDraft(null)}
+                          className="inline-flex items-center rounded border border-[#d8d0c5] bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
+                        >
+                          Anulează
+                        </button>
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={handleAutoMapProductUrl}
@@ -1342,14 +1421,32 @@ export default function DashboardClient({
                                 const images = productUrlValue ? [] : extractImageUrls(value);
                                 return (
                                   <td key={column} className="whitespace-nowrap px-3 py-2 align-top">
-                                    {productUrlValue ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => openProductPage(productUrlValue)}
-                                        className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
-                                      >
-                                        {getSiteLabel(productUrlValue)}
-                                      </button>
+                                    {isProductUrlColumn ? (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="text"
+                                          defaultValue={typeof value === "string" ? value : ""}
+                                          onKeyDown={(event) => {
+                                            if (event.key !== "Enter") return;
+                                            const url = event.currentTarget.value.trim();
+                                            setParsedRows((current) =>
+                                              current.map((r, i) => (i === index ? { ...r, [column]: url } : r))
+                                            );
+                                          }}
+                                          disabled={!includedRows[index]}
+                                          placeholder="https://..."
+                                          className="w-40 border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] text-[#3d393d]"
+                                        />
+                                        {productUrlValue && (
+                                          <button
+                                            type="button"
+                                            onClick={() => openProductPage(productUrlValue)}
+                                            className="inline-flex w-fit items-center rounded border border-[#d8d0c5] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#301934] hover:bg-[#f8f7f6]"
+                                          >
+                                            {getSiteLabel(productUrlValue)}
+                                          </button>
+                                        )}
+                                      </div>
                                     ) : images.length > 0 ? (
                                       <div className="flex gap-1">
                                         {images.slice(0, 4).map((src) => (
@@ -1386,11 +1483,60 @@ export default function DashboardClient({
                                         Nume: {scrapedNames[index]}
                                       </span>
                                     )}
-                                    {(scrapedPrices[index]?.now ?? scrapedPrices[index]?.old) != null && (
-                                      <span className="text-[10px] text-[#301934]">
-                                        Preț: {scrapedPrices[index]?.now ?? "—"}
-                                        {scrapedPrices[index]?.old ? ` (PRP ${scrapedPrices[index]?.old})` : ""} RON
-                                      </span>
+                                    {((scrapedPrices[index]?.now ?? scrapedPrices[index]?.old) != null || scrapedSizes[index]) && (
+                                      <div className="grid gap-1">
+                                        <label className="flex items-center gap-1 text-[10px] text-[#301934]">
+                                          Preț:
+                                          <input
+                                            type="number"
+                                            value={scrapedPrices[index]?.now ?? ""}
+                                            onChange={(event) =>
+                                              setScrapedPrices((current) => ({
+                                                ...current,
+                                                [index]: {
+                                                  now: event.target.value === "" ? null : Number(event.target.value),
+                                                  old: current[index]?.old ?? null,
+                                                },
+                                              }))
+                                            }
+                                            disabled={!includedRows[index]}
+                                            className="w-16 border border-[#d8d0c5] bg-white px-1 py-0.5 text-[10px] text-[#3d393d]"
+                                          />
+                                          RON
+                                        </label>
+                                        <label className="flex items-center gap-1 text-[10px] text-[#301934]">
+                                          PRP:
+                                          <input
+                                            type="number"
+                                            value={scrapedPrices[index]?.old ?? ""}
+                                            onChange={(event) =>
+                                              setScrapedPrices((current) => ({
+                                                ...current,
+                                                [index]: {
+                                                  now: current[index]?.now ?? null,
+                                                  old: event.target.value === "" ? null : Number(event.target.value),
+                                                },
+                                              }))
+                                            }
+                                            disabled={!includedRows[index]}
+                                            className="w-16 border border-[#d8d0c5] bg-white px-1 py-0.5 text-[10px] text-[#3d393d]"
+                                          />
+                                          RON
+                                        </label>
+                                        <label className="flex items-center gap-1 text-[10px] text-[#301934]">
+                                          Cantitate:
+                                          <input
+                                            type="text"
+                                            value={scrapedSizes[index] ?? ""}
+                                            onChange={(event) =>
+                                              setScrapedSizes((current) => ({ ...current, [index]: event.target.value }))
+                                            }
+                                            disabled={!includedRows[index]}
+                                            placeholder="ex. 50 ml"
+                                            className="w-16 border border-[#d8d0c5] bg-white px-1 py-0.5 text-[10px] text-[#3d393d]"
+                                          />
+                                        </label>
+                                      </div>
                                     )}
                                     {scrapeStatus[index] && scrapeStatus[index] !== "loading" && scrapeStatus[index] !== "ok" && (
                                       <span className="max-w-[9rem] text-[10px] text-[#b23b3b]">{scrapeStatus[index]}</span>

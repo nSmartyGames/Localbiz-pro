@@ -1,12 +1,28 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { categories } from "@/lib/products";
 import { useCart } from "@/lib/cart-context";
 import { PriceTag } from "@/components/store/PriceTag";
+
+// Douglas and Notino both block plain server-side fetches (Akamai bot
+// checks) and only scrape through the local headless-browser bridge the
+// Sync dashboard drives from the browser (see DashboardClient.tsx's own
+// LOCAL_BRIDGE_HOSTS). This admin rescan button posts to a server route
+// instead, which can't reach that local bridge — so for these hosts it
+// would otherwise silently report "nimic lipsă" instead of the truth.
+const LOCAL_BRIDGE_HOSTS = /(^|\.)(douglas\.ro|notino\.ro)$/i;
+
+function needsLocalBridge(url: string): boolean {
+  try {
+    return LOCAL_BRIDGE_HOSTS.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
 
 function initials(name: string): string {
   return name
@@ -60,32 +76,62 @@ export default function ProductPage({
     priceNow: number | null;
     priceOld: number | null;
   } | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [rescanState, setRescanState] = useState<"idle" | "loading" | "done" | "empty" | "needsBridge">("idle");
+
+  useEffect(() => {
+    fetch("/dpstore/api/admin/status")
+      .then((res) => res.json())
+      .then((data) => setIsAdmin(Boolean(data?.isAdmin)))
+      .catch(() => {});
+  }, []);
+
+  const fetchGapFill = useCallback((productId: string) => {
+    return fetch("/dpstore/api/store/fill-product-gaps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.updated) {
+          setFilledGaps(data.updated);
+          setRescanState("done");
+        } else {
+          setRescanState("empty");
+        }
+      })
+      .catch(() => setRescanState("empty"));
+  }, []);
+
+  // Admin-only manual trigger: sets the visible "loading" state, then reuses
+  // the same fetch the silent auto-heal effect below uses. Douglas/Notino
+  // URLs can't be scraped by this server route at all (see needsLocalBridge
+  // above) — surface that instead of firing a request doomed to no-op.
+  const runRescan = useCallback(
+    (productId: string, productUrl: string) => {
+      if (needsLocalBridge(productUrl)) {
+        setRescanState("needsBridge");
+        return;
+      }
+      setRescanState("loading");
+      fetchGapFill(productId);
+    },
+    [fetchGapFill]
+  );
 
   // A product row can carry a real "Product URL" but still be missing the
   // image or price the Sync import didn't manage to scrape. Re-run that same
   // scrape once per page visit, on demand, so the gap self-heals in Airtable
-  // (and on screen) without a manual re-sync.
+  // (and on screen) without a manual re-sync. Runs for every visitor, silently
+  // (no loading state) — the visible rescan button above is admin-only.
   useEffect(() => {
-    if (!product?.productUrl) return;
+    if (!product?.productUrl || needsLocalBridge(product.productUrl)) return;
     const missingImage = product.imageUrl === null || /^https:\/\/picsum\.photos\//i.test(product.imageUrl);
     const missingPrice = product.priceNow === null;
     if (!missingImage && !missingPrice) return;
-
-    let cancelled = false;
-    fetch("/api/store/fill-product-gaps", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ productId: product.id }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled && data?.updated) setFilledGaps(data.updated);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [product?.id, product?.productUrl, product?.imageUrl, product?.priceNow]);
+    fetchGapFill(product.id);
+  }, [product?.id, product?.productUrl, product?.imageUrl, product?.priceNow, fetchGapFill]);
 
   if (!product) {
     notFound();
@@ -231,7 +277,7 @@ export default function ProductPage({
           )}
 
           <div className="mt-8 border-t border-[#e6e3e5] pt-6">
-            <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-[#b08d57]">
+            <h2 className="mb-6 text-xs font-semibold uppercase tracking-[0.18em] text-[#b08d57]">
               Detalii produs
             </h2>
             {extraInfo && (
@@ -242,6 +288,39 @@ export default function ProductPage({
             <div className="whitespace-pre-line text-[15px] leading-[1.85] text-[#3d393d]">
               {mainDescription || "Fără descriere disponibilă."}
             </div>
+
+            {isAdmin && displayProduct.productUrl && (
+              <div className="mt-5 rounded-md border border-dashed border-[#e6e3e5] bg-[#faf8f4] p-4 text-xs text-[#6b676b]">
+                <div className="mb-2 font-semibold uppercase tracking-wide text-[#b08d57]">Admin: sursă produs</div>
+                <a
+                  href={displayProduct.productUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mb-3 block break-all text-[#301934] hover:underline"
+                >
+                  {displayProduct.productUrl}
+                </a>
+                <button
+                  type="button"
+                  disabled={rescanState === "loading"}
+                  onClick={() => runRescan(displayProduct.id, displayProduct.productUrl!)}
+                  className="rounded-sm border border-[#301934] px-3 py-1.5 font-semibold text-[#301934] hover:bg-[#301934] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {rescanState === "loading" ? "Se rescanează…" : "Rescanează produsul"}
+                </button>
+                {rescanState === "done" && (
+                  <span className="ml-3 text-[#4B2354]">Actualizat din pagina sursă.</span>
+                )}
+                {rescanState === "empty" && (
+                  <span className="ml-3 text-[#6b6b66]">Nimic lipsă de completat.</span>
+                )}
+                {rescanState === "needsBridge" && (
+                  <span className="ml-3 text-[#b3261e]">
+                    Douglas/Notino necesită bridge-ul local — rulează-l din Sync (dashboard).
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

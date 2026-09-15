@@ -19,9 +19,6 @@ export async function POST(req: Request) {
   }
 
   const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
 
   let body: { items?: CheckoutItem[] };
   try {
@@ -93,7 +90,7 @@ export async function POST(req: Request) {
       allow_promotion_codes: true,
       success_url: `${origin}${basePath}/store/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}${basePath}/store/cancel`,
-      client_reference_id: userId,
+      client_reference_id: userId ?? undefined,
     });
 
     return NextResponse.json({ url: session.url });

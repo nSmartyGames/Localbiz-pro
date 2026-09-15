@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCart } from "@/lib/cart-context";
 import { formatPrice } from "@/components/store/PriceTag";
 
@@ -26,7 +25,6 @@ export default function CartPage() {
     subtotalCurrency,
     getProduct,
   } = useCart();
-  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,11 +46,6 @@ export default function CartPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items }),
       });
-
-      if (res.status === 401) {
-        router.push("/store/sign-in");
-        return;
-      }
 
       const data: { url?: string; error?: string } = await res.json();
 
