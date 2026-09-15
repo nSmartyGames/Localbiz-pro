@@ -63,6 +63,10 @@ async function scrapeProductGallery(productUrl: string): Promise<string[]> {
       // canonical URL when no real photo is set would otherwise import the
       // product page link itself as if it were a photo.
       .filter((url) => url !== productUrl)
+      // Same failure mode as above but for a different page (e.g. a
+      // "related product" link caught by the product|gallery|zoom match) —
+      // an .html/.htm page has no business ending up in a gallery of photos.
+      .filter((url) => !/\.html?(?:[?#]|$)/i.test(url))
       .slice(0, 8);
   } catch {
     return [];
@@ -249,6 +253,13 @@ export async function uploadImage(imageUrl: string, productId: string, index = 0
   const imageResponse = await fetch(imageUrl, { cache: "no-store" });
   if (!imageResponse.ok) throw new Error(`Image could not be downloaded: ${imageUrl}`);
   const contentType = imageResponse.headers.get("content-type")?.split(";")[0] || "image/jpeg";
+  // A blocked/redirected fetch (bot check, login wall, dead link) still
+  // returns 200 but with an HTML error page as the body — uploading that
+  // and naming it by its real (non-image) content-type is how a ".html"
+  // link ends up saved as a product's "photo".
+  if (!contentType.startsWith("image/")) {
+    throw new Error(`URL did not return an image (got ${contentType}): ${imageUrl}`);
+  }
   const extension = contentType.split("/")[1] || "jpg";
   const buffer = Buffer.from(await imageResponse.arrayBuffer());
   // Content-hashed name: a re-import whose source image actually changed
@@ -274,6 +285,14 @@ export async function uploadImage(imageUrl: string, productId: string, index = 0
       },
     });
   return `https://storage.googleapis.com/${bucket}/${objectName}`;
+}
+
+// One bad source image (blocked fetch, dead link) shouldn't cost the whole
+// gallery — upload every candidate independently and keep only the ones
+// that actually came back as an image.
+async function uploadImages(urls: string[], productId: string): Promise<string[]> {
+  const results = await Promise.allSettled(urls.map((url, index) => uploadImage(url, productId, index)));
+  return results.filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled").map((result) => result.value);
 }
 
 function slugify(value: string): string {
@@ -394,9 +413,7 @@ export async function importProductRow(
   if (includeImages) {
     const galleryImages = productUrl ? await scrapeProductGallery(productUrl) : [];
     const sourceImages = Array.from(new Set([...sourceImagesFromRow(row), ...galleryImages]));
-    uploadedImages = sourceImages.length
-      ? await Promise.all(sourceImages.map((url, imageIndex) => uploadImage(url, productId, imageIndex)))
-      : [];
+    uploadedImages = sourceImages.length ? await uploadImages(sourceImages, productId) : [];
   }
 
   let fields: Record<string, unknown>;
@@ -452,6 +469,49 @@ export async function importProductRow(
   return { name, category, airtableId: payload.id, imageUrl: uploadedImages[0] ?? null, overwritten: Boolean(existingId) };
 }
 
+// Admin-only correction for a product's own "Product URL" — e.g. the
+// scraped source link went stale or was wrong to begin with. Looked up by
+// productId (not trusted from the client beyond the new value itself) the
+// same way fillMissingProductFields does. A changed URL points at a
+// different page, so its gallery is re-scraped and re-uploaded here too —
+// otherwise "Image URL"/"Product Images" would keep pointing at the old
+// source's photos under the new link.
+export async function updateProductUrl(
+  productId: string,
+  productUrl: string
+): Promise<{ imageUrl: string | null; images: string[] }> {
+  const { getAllStoreProductRecords } = await import("@/lib/airtable-products");
+  const records = await getAllStoreProductRecords();
+  const record = records.find((entry) => entry.product.id === productId);
+  if (!record) throw new Error("Product not found.");
+
+  const fields: Record<string, unknown> = { "Product URL": productUrl };
+
+  const galleryImages = await scrapeProductGallery(productUrl);
+  let uploaded: string[] = [];
+  if (galleryImages.length > 0) {
+    uploaded = await uploadImages(galleryImages, productId);
+    fields["Image URL"] = uploaded[0] ?? "";
+    fields["Product Images"] = uploaded.join(", ");
+  }
+
+  const baseId = required("AIRTABLE_BASE_ID");
+  const table = encodeURIComponent(process.env.AIRTABLE_PRODUCTS_TABLE ?? "Products");
+  const response = await fetch(`https://api.airtable.com/v0/${baseId}/${table}/${record.airtableRecordId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${required("AIRTABLE_API_KEY")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields }),
+  });
+  if (!response.ok) {
+    throw new Error(`Airtable write failed: ${response.status} ${await response.text()}`);
+  }
+
+  return { imageUrl: uploaded[0] ?? null, images: uploaded };
+}
+
 // Patches whatever a Products row is genuinely missing (no real image, no
 // price) by re-scraping the row's own "Product URL" — the same source used
 // at import time, but re-run on demand from the storefront product page so
@@ -484,13 +544,13 @@ export async function fillMissingProductFields(productId: string): Promise<{
   let imageUrl = product.imageUrl;
   let images = product.images ?? [];
   if (needsImage && scraped.images.length > 0) {
-    const uploaded = await Promise.all(
-      scraped.images.slice(0, 8).map((url, index) => uploadImage(url, productId, index))
-    );
-    imageUrl = uploaded[0] ?? imageUrl;
-    images = uploaded;
-    fields["Image URL"] = uploaded[0] ?? "";
-    fields["Product Images"] = uploaded.join(", ");
+    const uploaded = await uploadImages(scraped.images.slice(0, 8), productId);
+    if (uploaded.length > 0) {
+      imageUrl = uploaded[0];
+      images = uploaded;
+      fields["Image URL"] = uploaded[0];
+      fields["Product Images"] = uploaded.join(", ");
+    }
   }
 
   let priceNow = product.priceNow;

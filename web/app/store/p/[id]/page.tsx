@@ -78,6 +78,9 @@ export default function ProductPage({
   } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [rescanState, setRescanState] = useState<"idle" | "loading" | "done" | "empty" | "needsBridge">("idle");
+  const [urlDraft, setUrlDraft] = useState<string | null>(null);
+  const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [urlSaveState, setUrlSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
   useEffect(() => {
     fetch("/dpstore/api/admin/status")
@@ -120,6 +123,31 @@ export default function ProductPage({
     [fetchGapFill]
   );
 
+  const saveProductUrl = useCallback((productId: string, productUrl: string) => {
+    setUrlSaveState("saving");
+    fetch("/dpstore/api/admin/update-product-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId, productUrl }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.error) throw new Error(data.error);
+        setSavedUrl(productUrl);
+        setUrlDraft(null);
+        setUrlSaveState("saved");
+        if (data?.imageUrl) {
+          setFilledGaps((current) => ({
+            imageUrl: data.imageUrl,
+            images: data.images ?? [],
+            priceNow: current?.priceNow ?? null,
+            priceOld: current?.priceOld ?? null,
+          }));
+        }
+      })
+      .catch(() => setUrlSaveState("error"));
+  }, []);
+
   // A product row can carry a real "Product URL" but still be missing the
   // image or price the Sync import didn't manage to scrape. Re-run that same
   // scrape once per page visit, on demand, so the gap self-heals in Airtable
@@ -137,15 +165,18 @@ export default function ProductPage({
     notFound();
   }
 
-  const displayProduct = filledGaps
-    ? {
-        ...product,
-        imageUrl: filledGaps.imageUrl ?? product.imageUrl,
-        images: filledGaps.images.length > 0 ? filledGaps.images : product.images,
-        priceNow: filledGaps.priceNow ?? product.priceNow,
-        priceOld: filledGaps.priceOld ?? product.priceOld,
-      }
-    : product;
+  const displayProduct = {
+    ...product,
+    ...(filledGaps
+      ? {
+          imageUrl: filledGaps.imageUrl ?? product.imageUrl,
+          images: filledGaps.images.length > 0 ? filledGaps.images : product.images,
+          priceNow: filledGaps.priceNow ?? product.priceNow,
+          priceOld: filledGaps.priceOld ?? product.priceOld,
+        }
+      : {}),
+    productUrl: savedUrl ?? product.productUrl,
+  };
 
   const gallery = displayProduct.imageUrl
     ? [displayProduct.imageUrl, ...(displayProduct.images ?? []).filter((src) => src !== displayProduct.imageUrl)]
@@ -289,25 +320,45 @@ export default function ProductPage({
               {mainDescription || "Fără descriere disponibilă."}
             </div>
 
-            {isAdmin && displayProduct.productUrl && (
+            {isAdmin && (
               <div className="mt-5 rounded-md border border-dashed border-[#e6e3e5] bg-[#faf8f4] p-4 text-xs text-[#6b676b]">
                 <div className="mb-2 font-semibold uppercase tracking-wide text-[#b08d57]">Admin: sursă produs</div>
-                <a
-                  href={displayProduct.productUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mb-3 block break-all text-[#301934] hover:underline"
-                >
-                  {displayProduct.productUrl}
-                </a>
-                <button
-                  type="button"
-                  disabled={rescanState === "loading"}
-                  onClick={() => runRescan(displayProduct.id, displayProduct.productUrl!)}
-                  className="rounded-sm border border-[#301934] px-3 py-1.5 font-semibold text-[#301934] hover:bg-[#301934] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {rescanState === "loading" ? "Se rescanează…" : "Rescanează produsul"}
-                </button>
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="url"
+                    value={urlDraft ?? displayProduct.productUrl ?? ""}
+                    onChange={(e) => {
+                      setUrlDraft(e.target.value);
+                      setUrlSaveState("idle");
+                    }}
+                    placeholder="https://..."
+                    className="min-w-0 flex-1 rounded-sm border border-[#e6e3e5] bg-white px-2 py-1.5 text-xs text-[#242124] focus:border-[#301934] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={urlSaveState === "saving" || !(urlDraft ?? displayProduct.productUrl)}
+                    onClick={() => saveProductUrl(displayProduct.id, (urlDraft ?? displayProduct.productUrl)!.trim())}
+                    className="rounded-sm border border-[#301934] px-3 py-1.5 font-semibold text-[#301934] hover:bg-[#301934] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {urlSaveState === "saving" ? "Se salvează…" : "Salvează"}
+                  </button>
+                </div>
+                {urlSaveState === "saved" && (
+                  <div className="mb-3 text-[#4B2354]">URL actualizat.</div>
+                )}
+                {urlSaveState === "error" && (
+                  <div className="mb-3 text-[#b3261e]">Salvarea a eșuat — încearcă din nou.</div>
+                )}
+                {displayProduct.productUrl && (
+                  <button
+                    type="button"
+                    disabled={rescanState === "loading"}
+                    onClick={() => runRescan(displayProduct.id, displayProduct.productUrl!)}
+                    className="rounded-sm border border-[#301934] px-3 py-1.5 font-semibold text-[#301934] hover:bg-[#301934] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {rescanState === "loading" ? "Se rescanează…" : "Rescanează produsul"}
+                  </button>
+                )}
                 {rescanState === "done" && (
                   <span className="ml-3 text-[#4B2354]">Actualizat din pagina sursă.</span>
                 )}
