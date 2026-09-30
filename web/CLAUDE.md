@@ -239,3 +239,25 @@ exploring: Organizations
 (https://clerk.com/docs/guides/organizations/overview), Components
 (https://clerk.com/docs/reference/components/overview), and the Dashboard
 (https://dashboard.clerk.com/).
+
+## Deployment (verified 2026-09-30)
+
+- Production URL: **https://allibuild.com/dpstore/store** (`basePath: "/dpstore"`).
+- Deployed with the Vercel CLI (`vercel --prod` from `web/`) into the Vercel
+  project **`squirrel-pi`** (team `nc-app`, `team_DYzYVxF8CdHI7QZDb3pYWHij`),
+  which owns the `allibuild.com` / `www.allibuild.com` domains. The project is
+  not Git-linked, so pushes do not auto-deploy.
+- Because this app replaced the SquirrelPi build on that project,
+  `allibuild.com/` (root) returns 404 — only `/dpstore/*` is served. To run
+  both apps on one domain, give localbiz-pro its own Vercel project and add
+  Next.js multi-zone rewrites (`/dpstore` and `/dpstore/:path*`) in SquirrelPi,
+  plus `/dpstore(.*)` in SquirrelPi's public routes in `proxy.ts`.
+- Env vars (Clerk `pk_live`/`sk_live` for clerk.allibuild.com, Airtable, Stripe,
+  Resend, GCS) live on the `squirrel-pi` Vercel project; the Vercel MCP
+  connector cannot list them (403).
+- The build fails without `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (prerender of
+  `/_not-found`).
+- The Airtable base is **`dps`** (`appxwsGR6DRlp3uR7`). If the store shows
+  categories but no products, check Airtable first: `getAllStoreProductRecords`
+  silently returns `[]` on any non-OK response, including 429 "monthly API
+  billing plan limit exceeded" (hit in Sept 2026).
