@@ -20,6 +20,7 @@ export type CategorySlug =
   | "uleiuri-tratamente"
   | "seturi-ingrijire"
   | "suplimente-vitamine"
+  | "slabire-trackere"
   | "casa-decor"
   | "gradina-exterior"
   | "fashion-men-shoes";
@@ -83,6 +84,13 @@ export const categories: Category[] = [
     name: "Suplimente & vitamine",
     tagline: "Sănătate susținută zilnic, din surse de încredere.",
     heroProductId: "ph-balance-probiotic-30cps",
+  },
+  {
+    slug: "slabire-trackere",
+    department: "health",
+    name: "Slăbire & trackere",
+    tagline: "Tracker vizual «Primii 10 kg» — PDF imprimabil și pentru tabletă.",
+    heroProductId: "tracker-primii-10kg-calm-teal",
   },
   {
     slug: "casa-decor",

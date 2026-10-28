@@ -1,4 +1,5 @@
 import type { CategorySlug, Product } from "@/lib/products";
+import { getDigitalProducts } from "@/lib/digital-products";
 
 function numericField(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -116,7 +117,10 @@ export async function getAllStoreProductRecords(): Promise<StoreProductRecord[]>
 }
 
 export async function getAllStoreProducts(): Promise<Product[]> {
-  return (await getAllStoreProductRecords()).map((record) => record.product);
+  const airtable = (await getAllStoreProductRecords()).map((record) => record.product);
+  // Static digital downloads (e.g. weight-loss trackers) are appended so the
+  // storefront, cart, checkout and success page share one merged catalog.
+  return [...airtable, ...getDigitalProducts()];
 }
 
 // Category values and column names for the dashboard's Sync page — both

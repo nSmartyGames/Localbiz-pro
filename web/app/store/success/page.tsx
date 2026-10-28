@@ -1,5 +1,6 @@
 import Link from "next/link";
 import Stripe from "stripe";
+import { DigitalDownloads } from "@/components/store/DigitalDownloads";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -75,6 +76,8 @@ export default async function SuccessPage({
             {summary.currency.toUpperCase()}
           </p>
         )}
+        {sessionId && <DigitalDownloads sessionId={sessionId} />}
+        <div>
         <Link
           href="/store"
           style={{
@@ -91,6 +94,7 @@ export default async function SuccessPage({
         >
           Înapoi la magazin
         </Link>
+        </div>
       </div>
     </main>
   );

@@ -172,7 +172,7 @@ async function scrapePdp(url) {
             // to it is just the manufacturer's suggested price, not a real
             // "was" price, so it's ignored even when present.
             const checkedVariant = document.querySelector('input[name="sizeVariants"][aria-checked="true"]');
-            const priceScope = checkedVariant ? checkedVariant.closest('label') : document;
+            const priceScope = checkedVariant ? checkedVariant.closest('label') : document.body;
 
             const current =
               priceScope?.querySelector('[data-testid="price-discount"]') ||
@@ -190,7 +190,7 @@ async function scrapePdp(url) {
               priceOld = null;
             }
 
-            const sizeMatch = priceScope?.textContent.match(/([\d.,]+)\s*ml/i);
+            const sizeMatch = (priceScope?.textContent || '').match(/([\d.,]+)\s*ml/i);
             if (sizeMatch) size = `${sizeMatch[1]} ml`;
             // The PDP gallery is a Swiper carousel that lazy-loads every slide but
             // the first: non-visible <img>s carry their real URL in data-lazy-src

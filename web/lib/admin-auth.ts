@@ -1,6 +1,6 @@
 import { currentUser } from "@clerk/nextjs/server";
 
-const ADMIN_EMAIL = (process.env.ADMIN_EMAIL ?? "lucian.virtic@gmail.com").toLowerCase();
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL?.trim() || "lucian.virtic@gmail.com").toLowerCase();
 
 export async function requireAdmin() {
   const user = await currentUser();
